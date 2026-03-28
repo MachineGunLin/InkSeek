@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from playwright.sync_api import Error, TargetClosedError, TimeoutError, sync_playwright
+from playwright.sync_api import Error, TimeoutError, sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -56,10 +56,15 @@ def session_file_mtime() -> float | None:
     return STATE_PATH.stat().st_mtime
 
 
+def is_target_closed_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "target page" in message or "targetclosed" in message or "has been closed" in message
+
+
 def safe_page_url(page) -> str:
     try:
         return page.url
-    except (Error, TargetClosedError):
+    except Error:
         return ""
 
 
@@ -69,7 +74,7 @@ def has_avatar(page) -> bool:
         try:
             if locator.is_visible(timeout=300):
                 return True
-        except (Error, TargetClosedError):
+        except Error:
             continue
     return False
 
@@ -86,7 +91,7 @@ def wait_avatar(page, timeout_seconds: int) -> bool:
 def has_login_prompt(page) -> bool:
     try:
         text = page.locator("body").inner_text(timeout=1500)
-    except (Error, TargetClosedError):
+    except Error:
         return False
     return any(marker in text for marker in LOGIN_TEXT_MARKERS)
 
@@ -111,7 +116,7 @@ def try_session_first(playwright) -> bool:
         try:
             page.goto(SHELF_URL, wait_until="commit", timeout=20000)
             page.wait_for_timeout(1000)
-        except (TimeoutError, Error, TargetClosedError):
+        except (TimeoutError, Error):
             print("已有 Session 访问书架失败，需要扫码登录。")
             return False
 
@@ -139,7 +144,7 @@ def click_login_if_possible(page) -> None:
             if locator.is_visible(timeout=400):
                 locator.click(timeout=1000)
                 return
-        except (Error, TargetClosedError):
+        except Error:
             continue
 
 
@@ -153,7 +158,7 @@ def find_qr_locator(page):
                 box = locator.bounding_box()
                 if box and box["width"] >= 120 and box["height"] >= 120:
                     return locator
-            except (Error, TargetClosedError):
+            except Error:
                 continue
     return None
 
@@ -171,7 +176,7 @@ def ensure_shelf_ready(page) -> bool:
     try:
         page.goto(SHELF_URL, wait_until="commit", timeout=25000)
         page.wait_for_timeout(1500)
-    except (TimeoutError, Error, TargetClosedError):
+    except (TimeoutError, Error):
         return False
     return wait_avatar(page, timeout_seconds=12) and not has_login_prompt(page)
 
@@ -206,8 +211,10 @@ def run_qr_login(playwright) -> None:
         try:
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
             click_login_if_possible(page)
-        except TargetClosedError:
-            handle_target_closed(state_mtime_before, state_saved)
+        except Error as exc:
+            if is_target_closed_error(exc):
+                handle_target_closed(state_mtime_before, state_saved)
+            raise
 
         last_hash = None
         for attempt in range(1, 21):
@@ -226,23 +233,25 @@ def run_qr_login(playwright) -> None:
                     if qr_locator is not None:
                         last_hash = save_qr_if_changed(qr_locator, last_hash)
                     time.sleep(0.4)
-                except TargetClosedError:
-                    handle_target_closed(state_mtime_before, state_saved)
-                except Error:
+                except Error as exc:
+                    if is_target_closed_error(exc):
+                        handle_target_closed(state_mtime_before, state_saved)
                     time.sleep(0.4)
 
             print("二维码可能过期，正在刷新。")
             try:
                 page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
                 click_login_if_possible(page)
-            except TargetClosedError:
-                handle_target_closed(state_mtime_before, state_saved)
-            except Error:
+            except Error as exc:
+                if is_target_closed_error(exc):
+                    handle_target_closed(state_mtime_before, state_saved)
                 continue
 
         raise SystemExit("登录失败：多次扫码后仍未进入书架")
-    except TargetClosedError:
-        handle_target_closed(state_mtime_before, state_saved)
+    except Error as exc:
+        if is_target_closed_error(exc):
+            handle_target_closed(state_mtime_before, state_saved)
+        raise
     finally:
         browser.close()
 
