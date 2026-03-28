@@ -11,6 +11,7 @@ DATA_DIR = BASE_DIR / "data"
 QR_PATH = DATA_DIR / "login_qr.png"
 STATE_PATH = DATA_DIR / "weread_state.json"
 HOME_URL = "https://weread.qq.com/"
+SHELF_URL = "https://weread.qq.com/web/shelf"
 
 
 QR_SELECTORS = [
@@ -126,6 +127,11 @@ def confirm_logged_in(page, timeout_seconds: int = 15) -> bool:
     return False
 
 
+def is_home_or_shelf_url(url: str) -> bool:
+    normalized = url.rstrip("/")
+    return normalized == "https://weread.qq.com" or "/web/shelf" in url
+
+
 def main() -> None:
     ensure_data_dir()
 
@@ -146,6 +152,28 @@ def main() -> None:
 
             wait_login_transition(page, timeout_seconds=20)
             if confirm_logged_in(page, timeout_seconds=15):
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except TimeoutError:
+                    pass
+                time.sleep(3)
+
+                if not is_home_or_shelf_url(page.url):
+                    try:
+                        page.goto(SHELF_URL, wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Error:
+                        pass
+                    except TimeoutError:
+                        pass
+
+                if not (is_home_or_shelf_url(page.url) and has_avatar(page)):
+                    print(f"登录态未稳定，当前 URL: {page.url}")
+                    print("将刷新二维码并重试，不写入 session。")
+                    page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+                    click_login(page)
+                    continue
+
                 context.storage_state(path=str(STATE_PATH))
                 print(f"登录成功，登录态已保存: {STATE_PATH.resolve()}")
                 browser.close()
