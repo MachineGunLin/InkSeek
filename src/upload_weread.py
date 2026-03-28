@@ -7,11 +7,12 @@ from pathlib import Path
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
+from weread_session import HOME_URL, verify_session
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 STATE_PATH = DATA_DIR / "weread_state.json"
 DEBUG_SCREENSHOT_PATH = DATA_DIR / "upload_fail_debug.png"
-SHELF_URL = "https://weread.qq.com/shelf"
 
 REAL_BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -200,15 +201,16 @@ def dismiss_popups(page) -> None:
 
 def ensure_session_alive_or_exit(page) -> None:
     try:
-        page.goto(SHELF_URL, wait_until="commit", timeout=20000)
+        page.goto(HOME_URL, wait_until="commit", timeout=20000)
         page.wait_for_timeout(1000)
         dismiss_popups(page)
     except (TimeoutError, Error) as exc:
-        save_debug(page, "访问书架失败", exc)
-        raise SystemExit("无法访问书架，请先运行 python3 src/login_weread.py")
+        save_debug(page, "访问首页失败", exc)
+        raise SystemExit("无法访问微信读书首页，请先运行 python3 src/login_weread.py")
 
-    if wait_avatar(page, timeout_seconds=5) and not has_login_marker(page):
-        print("Session 有效，直接进入上传流程。")
+    ok, reason = verify_session(page, timeout_seconds=8)
+    if ok:
+        print(f"Session 有效，直接进入上传流程。{reason}")
         return
 
     save_debug(page, "Session 无效或已过期")

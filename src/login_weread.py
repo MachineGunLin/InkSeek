@@ -102,6 +102,14 @@ def maybe_success_hint(page) -> bool:
     return False
 
 
+def ensure_login_prompt(page) -> None:
+    click_login_if_possible(page)
+    try:
+        page.wait_for_timeout(800)
+    except Error:
+        pass
+
+
 def persist_storage_state(context) -> None:
     temp_state = STATE_PATH.with_suffix(".tmp.json")
     context.storage_state(path=str(temp_state))
@@ -149,7 +157,7 @@ def run_qr_login(playwright) -> None:
 
         try:
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
-            click_login_if_possible(page)
+            ensure_login_prompt(page)
         except Error as exc:
             if is_target_closed_error(exc):
                 handle_possible_manual_close()
@@ -162,13 +170,13 @@ def run_qr_login(playwright) -> None:
 
         while time.time() < deadline:
             try:
-                click_login_if_possible(page)
+                ensure_login_prompt(page)
 
                 qr_locator = find_qr_locator(page)
                 if qr_locator is not None:
                     last_hash = save_qr_if_changed(qr_locator, last_hash)
                 else:
-                    print("正在等待二维码出现或刷新...")
+                    print("首页已打开，正在等待二维码出现或刷新...")
 
                 if maybe_success_hint(page):
                     ok, reason = verify_session(page, timeout_seconds=6)
