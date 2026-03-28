@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 STATE_PATH = DATA_DIR / "weread_state.json"
 DEBUG_SCREENSHOT_PATH = DATA_DIR / "upload_fail_debug.png"
-HOME_URL = "https://weread.qq.com/"
+SHELF_URL = "https://weread.qq.com/shelf"
 
 REAL_BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -31,18 +31,16 @@ UPLOAD_SUCCESS_MARKERS = [
 UPLOAD_PROGRESS_MARKERS = ["上传中", "处理中", "导入中", "解析中"]
 UPLOAD_DIALOG_MARKERS = ["从电脑导入", "导入书籍", "导入本地图书", "拖拽", "上传"]
 
-AVATAR_SELECTORS = [
-    ".wr_avatar",
-    "img.wr_avatar",
-    "[class*='avatar'] img",
-    "[class*='avatar']",
-]
+AVATAR_SELECTOR = ".wr_avatar"
+UPLOAD_READY_SELECTOR = ".shelf_upload"
 
 UPLOAD_ENTRY_SELECTORS = [
+    ".shelf_upload",
     "text=传书",
     "text=从电脑导入",
     "text=导入书籍",
     "button:has-text('传书')",
+    "button:has-text('从电脑导入')",
     "a:has-text('传书')",
 ]
 
@@ -109,22 +107,11 @@ def save_debug(page, reason: str, exc: Exception | None = None) -> None:
         print(f"[上传失败] 截图失败: {screenshot_err}")
 
 
-def has_avatar(page) -> bool:
-    for selector in AVATAR_SELECTORS:
-        locator = page.locator(selector).first
-        try:
-            if locator.is_visible(timeout=500):
-                return True
-        except Error:
-            continue
-    return False
-
-
 def is_session_expired(page) -> bool:
     text = body_text(page)
     has_login_marker = any(marker in text for marker in LOGIN_MARKERS)
     on_login_url = "login" in safe_page_url(page)
-    return (has_login_marker or on_login_url) and not has_avatar(page)
+    return has_login_marker or on_login_url
 
 
 def dismiss_popups(page) -> None:
@@ -196,20 +183,41 @@ def upload_dialog_open(page) -> bool:
     return False
 
 
-def goto_home(page) -> None:
-    errors: list[Exception] = []
-    for wait_state in ["domcontentloaded", "networkidle"]:
-        try:
-            page.goto(HOME_URL, wait_until=wait_state, timeout=30000)
-            dismiss_popups(page)
-            print(f"首页访问成功，wait_until={wait_state}，URL={safe_page_url(page)}")
-            return
-        except (TimeoutError, Error) as exc:
-            errors.append(exc)
+def goto_shelf_and_probe(page) -> None:
+    try:
+        page.goto(SHELF_URL, wait_until="commit", timeout=30000)
+        page.wait_for_timeout(2000)
+        dismiss_popups(page)
+    except (TimeoutError, Error) as exc:
+        save_debug(page, "访问书架失败", exc)
+        raise SystemExit("无法访问微信读书书架，请查看 data/upload_fail_debug.png")
 
-    last_error = errors[-1] if errors else None
-    save_debug(page, "访问微信读书首页失败", last_error)
-    raise SystemExit("无法访问微信读书首页，请查看 data/upload_fail_debug.png")
+    try:
+        page.wait_for_selector(AVATAR_SELECTOR, timeout=10000)
+    except TimeoutError as exc:
+        if is_session_expired(page):
+            save_debug(page, "通行证失效，未检测到登录头像", exc)
+            raise SystemExit("通行证失效，请重新运行 login 脚本")
+        save_debug(page, "未检测到登录头像 .wr_avatar", exc)
+        raise SystemExit("页面未进入登录态，请查看 data/upload_fail_debug.png")
+
+    try:
+        page.wait_for_selector(UPLOAD_READY_SELECTOR, timeout=10000)
+        return
+    except TimeoutError:
+        pass
+
+    for selector in UPLOAD_ENTRY_SELECTORS:
+        try:
+            page.wait_for_selector(selector, timeout=2500)
+            return
+        except TimeoutError:
+            continue
+        except Error:
+            continue
+
+    save_debug(page, "未检测到传书入口（.shelf_upload / 传书按钮）")
+    raise SystemExit("页面未就绪：找不到传书入口，请查看 data/upload_fail_debug.png")
 
 
 def wait_upload_input(page, timeout_seconds: int = 40):
@@ -223,7 +231,7 @@ def wait_upload_input(page, timeout_seconds: int = 40):
 
         clicked = click_upload_entry(page)
         if clicked:
-            time.sleep(0.6)
+            page.wait_for_timeout(2000)
             if upload_dialog_open(page):
                 file_input = find_file_input(page)
                 if file_input is not None:
@@ -295,12 +303,7 @@ def main() -> None:
         page = context.new_page()
         page.on("dialog", lambda dialog: dialog.dismiss())
 
-        goto_home(page)
-
-        if is_session_expired(page):
-            save_debug(page, "会话已失效，首页出现登录态")
-            browser.close()
-            raise SystemExit("通行证失效，请重新运行 login 脚本")
+        goto_shelf_and_probe(page)
 
         try:
             upload_input = wait_upload_input(page, timeout_seconds=40)
