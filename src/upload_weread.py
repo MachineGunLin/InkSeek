@@ -7,12 +7,11 @@ from pathlib import Path
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
-from weread_session import HOME_URL, verify_session
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 STATE_PATH = DATA_DIR / "weread_state.json"
-DEBUG_SCREENSHOT_PATH = DATA_DIR / "upload_fail_debug.png"
+ERROR_SCREENSHOT_PATH = DATA_DIR / "upload_error.png"
+SHELF_URL = "https://weread.qq.com/shelf"
 
 REAL_BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -21,45 +20,24 @@ REAL_BROWSER_UA = (
 )
 
 LOGIN_MARKERS = ["登录", "立即登录", "扫码登录", "微信扫码", "手机号登录"]
-UPLOAD_SUCCESS_MARKERS = [
-    "上传成功",
-    "导入成功",
-    "上传完成",
-    "导入完成",
-    "已加入书架",
-    "已添加到书架",
-]
-UPLOAD_PROGRESS_MARKERS = ["上传中", "处理中", "导入中", "解析中"]
-UPLOAD_DIALOG_MARKERS = ["从电脑导入", "导入书籍", "导入本地图书", "拖拽", "上传"]
-
-AVATAR_SELECTORS = [
-    ".wr_avatar",
-    "img.wr_avatar",
-    "[class*='avatar'] img",
-    "[class*='avatar']",
-]
+UPLOAD_SUCCESS_MARKERS = ["上传成功", "导入成功", "上传完成", "导入完成"]
 
 UPLOAD_ENTRY_SELECTORS = [
     ".shelf_upload",
-    "text=传书",
+    "[class*='shelf_upload']",
+    "[class*='import']",
+    "text=从电脑传书",
     "text=从电脑导入",
-    "text=导入书籍",
-    "button:has-text('传书')",
+    "text=传书",
+    "button:has-text('从电脑传书')",
     "button:has-text('从电脑导入')",
-    "a:has-text('传书')",
+    "button:has-text('传书')",
 ]
 
 UPLOAD_INPUT_SELECTORS = [
     "input[type='file'][accept*='epub']",
     "input[type='file'][accept*='pdf']",
     "input[type='file']",
-]
-
-UPLOAD_DIALOG_SELECTORS = [
-    "[role='dialog']",
-    "[class*='dialog']",
-    "[class*='upload']",
-    "[class*='import']",
 ]
 
 POPUP_CLOSE_SELECTORS = [
@@ -72,12 +50,10 @@ POPUP_CLOSE_SELECTORS = [
 ]
 
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="上传本地 Epub/PDF 到微信读书私有文档")
     parser.add_argument("file", help="本地文件路径，例如 data/test.epub")
     return parser.parse_args()
-
 
 
 def body_text(page) -> str:
@@ -87,13 +63,11 @@ def body_text(page) -> str:
         return ""
 
 
-
 def safe_page_url(page) -> str:
     try:
         return page.url
     except Error:
         return "<unknown-url>"
-
 
 
 def safe_page_title(page) -> str:
@@ -103,19 +77,17 @@ def safe_page_title(page) -> str:
         return "<unknown-title>"
 
 
-
-def save_debug(page, reason: str, exc: Exception | None = None) -> None:
-    print(f"[上传失败] {reason}")
+def save_error(page, reason: str, exc: Exception | None = None) -> None:
+    print(reason)
     if exc is not None:
-        print(f"[上传失败] 异常详情: {type(exc).__name__}: {exc}")
-    print(f"[上传失败] 当前 URL: {safe_page_url(page)}")
-    print(f"[上传失败] 页面标题: {safe_page_title(page)}")
+        print(f"异常详情: {type(exc).__name__}: {exc}")
+    print(f"当前 URL: {safe_page_url(page)}")
+    print(f"页面标题: {safe_page_title(page)}")
     try:
-        page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
-        print(f"[上传失败] 调试截图: {DEBUG_SCREENSHOT_PATH.resolve()}")
-    except Error as screenshot_err:
-        print(f"[上传失败] 截图失败: {screenshot_err}")
-
+        page.screenshot(path=str(ERROR_SCREENSHOT_PATH), full_page=True)
+        print(f"错误截图: {ERROR_SCREENSHOT_PATH.resolve()}")
+    except Error:
+        pass
 
 
 def load_state_or_exit() -> None:
@@ -132,7 +104,6 @@ def load_state_or_exit() -> None:
         raise SystemExit("Session 为空，请运行 python3 src/login_weread.py")
 
 
-
 def resolve_file_or_exit(file_arg: str) -> Path:
     file_path = Path(file_arg).expanduser()
     if not file_path.is_absolute():
@@ -147,33 +118,9 @@ def resolve_file_or_exit(file_arg: str) -> Path:
     return file_path
 
 
-
-def has_avatar(page) -> bool:
-    for selector in AVATAR_SELECTORS:
-        locator = page.locator(selector).first
-        try:
-            if locator.is_visible(timeout=300):
-                return True
-        except Error:
-            continue
-    return False
-
-
-
-def wait_avatar(page, timeout_seconds: int) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        if has_avatar(page):
-            return True
-        time.sleep(0.2)
-    return False
-
-
-
 def has_login_marker(page) -> bool:
     text = body_text(page)
     return any(marker in text for marker in LOGIN_MARKERS)
-
 
 
 def dismiss_popups(page) -> None:
@@ -185,8 +132,8 @@ def dismiss_popups(page) -> None:
             continue
 
         for idx in range(min(total, 4)):
-            item = locator.nth(idx)
             try:
+                item = locator.nth(idx)
                 if item.is_visible(timeout=200):
                     item.click(timeout=400)
             except Error:
@@ -198,44 +145,34 @@ def dismiss_popups(page) -> None:
         pass
 
 
-
-def ensure_session_alive_or_exit(page) -> None:
+def wait_shelf_upload_area(page) -> None:
     try:
-        page.goto(HOME_URL, wait_until="commit", timeout=20000)
-        page.wait_for_timeout(1000)
+        page.goto(SHELF_URL, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_selector(".shelf_upload", timeout=20000)
         dismiss_popups(page)
-    except (TimeoutError, Error) as exc:
-        save_debug(page, "访问首页失败", exc)
-        raise SystemExit("无法访问微信读书首页，请先运行 python3 src/login_weread.py")
-
-    ok, reason = verify_session(page, timeout_seconds=8)
-    if ok:
-        print(f"Session 有效，直接进入上传流程。{reason}")
         return
+    except TimeoutError as exc:
+        dismiss_popups(page)
+        if has_login_marker(page):
+            save_error(page, "Session 已失效，请重新运行 login 脚本", exc)
+            raise SystemExit("通行证失效，请运行 python3 src/login_weread.py")
 
-    save_debug(page, "Session 无效或已过期")
-    raise SystemExit("通行证失效，请运行 python3 src/login_weread.py")
+        file_input = find_file_input(page)
+        if file_input is not None:
+            return
 
-
-
-def click_upload_entry(page) -> bool:
-    for selector in UPLOAD_ENTRY_SELECTORS:
-        locator = page.locator(selector).first
-        try:
-            if locator.is_visible(timeout=400):
-                locator.click(timeout=1200)
-                return True
-        except Error:
-            continue
-    return False
-
+        save_error(page, "书架页加载正常，但上传动作卡住了", exc)
+        raise SystemExit("书架页加载正常，但上传动作卡住了")
+    except Error as exc:
+        save_error(page, "访问书架页失败", exc)
+        raise SystemExit("访问书架页失败")
 
 
 def find_file_input(page):
     for frame in page.frames:
         for selector in UPLOAD_INPUT_SELECTORS:
-            locator = frame.locator(selector).first
             try:
+                locator = frame.locator(selector).first
                 if locator.count() > 0:
                     return locator
             except Error:
@@ -243,74 +180,64 @@ def find_file_input(page):
     return None
 
 
-
-def upload_dialog_open(page) -> bool:
-    text = body_text(page)
-    if any(marker in text for marker in UPLOAD_DIALOG_MARKERS):
-        return True
-
-    for selector in UPLOAD_DIALOG_SELECTORS:
-        locator = page.locator(selector)
+def click_upload_entry(page) -> bool:
+    for selector in UPLOAD_ENTRY_SELECTORS:
         try:
-            total = locator.count()
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=300):
+                locator.click(timeout=1000)
+                return True
         except Error:
             continue
-
-        for idx in range(min(total, 5)):
-            item = locator.nth(idx)
-            try:
-                if item.is_visible(timeout=200):
-                    return True
-            except Error:
-                continue
-
     return False
 
 
-
-def wait_upload_input(page, timeout_seconds: int = 40):
+def wait_upload_input(page, timeout_seconds: int = 10):
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         dismiss_popups(page)
-
         file_input = find_file_input(page)
         if file_input is not None:
             return file_input
-
-        if click_upload_entry(page):
-            page.wait_for_timeout(2000)
-            if upload_dialog_open(page):
-                file_input = find_file_input(page)
-                if file_input is not None:
-                    return file_input
-
-        time.sleep(0.4)
-
-    raise TimeoutError("未找到传书输入框")
+        time.sleep(0.3)
+    return None
 
 
+def resolve_upload_input(page):
+    file_input = wait_upload_input(page, timeout_seconds=2)
+    if file_input is not None:
+        return file_input
 
-def wait_upload_finished(page, book_name: str, timeout_seconds: int = 300) -> bool:
+    if not click_upload_entry(page):
+        raise SystemExit("书架页加载正常，但没找到“从电脑传书”入口")
+
+    page.wait_for_timeout(2000)
+    dismiss_popups(page)
+
+    file_input = wait_upload_input(page, timeout_seconds=10)
+    if file_input is None:
+        raise SystemExit("书架页加载正常，但上传动作卡住了")
+
+    return file_input
+
+
+def wait_upload_success(page, timeout_seconds: int = 30) -> bool:
+    try:
+        page.wait_for_selector("text=上传成功", timeout=timeout_seconds * 1000)
+        return True
+    except TimeoutError:
+        pass
+    except Error:
+        pass
+
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         dismiss_popups(page)
-
-        if has_login_marker(page) and not has_avatar(page):
-            raise SystemExit("通行证失效，请运行 python3 src/login_weread.py")
-
         text = body_text(page)
         if any(marker in text for marker in UPLOAD_SUCCESS_MARKERS):
             return True
-
-        if book_name and book_name in text:
-            in_progress = any(marker in text for marker in UPLOAD_PROGRESS_MARKERS)
-            if not in_progress:
-                return True
-
-        time.sleep(1)
-
+        time.sleep(0.5)
     return False
-
 
 
 def main() -> None:
@@ -324,38 +251,31 @@ def main() -> None:
         page = context.new_page()
         page.on("dialog", lambda dialog: dialog.dismiss())
 
-        ensure_session_alive_or_exit(page)
+        wait_shelf_upload_area(page)
 
         try:
-            upload_input = wait_upload_input(page, timeout_seconds=40)
-        except TimeoutError as exc:
-            save_debug(page, "未找到传书入口或文件输入框", exc)
+            upload_input = resolve_upload_input(page)
+        except SystemExit as exc:
+            save_error(page, str(exc))
             browser.close()
-            raise SystemExit("传书入口定位失败，请查看 data/upload_fail_debug.png")
+            raise
 
         try:
             upload_input.set_input_files(str(file_path))
         except Error as exc:
-            save_debug(page, f"无法注入上传文件: {file_path}", exc)
+            save_error(page, f"无法注入上传文件: {file_path}", exc)
             browser.close()
-            raise SystemExit("上传失败，请查看 data/upload_fail_debug.png")
+            raise SystemExit("上传失败，请检查上传入口")
 
         print(f"开始上传: {file_path}")
-        try:
-            finished = wait_upload_finished(page, file_path.stem, timeout_seconds=300)
-        except SystemExit:
-            save_debug(page, "上传过程中登录态失效")
+        success = wait_upload_success(page, timeout_seconds=30)
+        if not success:
+            save_error(page, "书架页加载正常，但上传动作卡住了")
             browser.close()
-            raise
+            raise SystemExit("书架页加载正常，但上传动作卡住了")
 
-        if not finished:
-            save_debug(page, "上传超时，300 秒未完成")
-            browser.close()
-            raise SystemExit("上传超时，请查看 data/upload_fail_debug.png")
-
-        print(f"《{file_path.stem}》已成功送达书架")
         browser.close()
-
+        print(f"寻墨成功，《{file_path.stem}》已送达微信读书书架。")
 
 
 if __name__ == "__main__":
