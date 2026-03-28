@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sys
 import time
 from pathlib import Path
 
-from playwright.sync_api import Error, TimeoutError, sync_playwright
+from playwright.sync_api import Error, sync_playwright
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+from weread_session import DATA_DIR, STATE_PATH, remove_state_file, session_file_usable, verify_session
+
 QR_PATH = DATA_DIR / "login_qr.png"
-STATE_PATH = DATA_DIR / "weread_state.json"
 HOME_URL = "https://weread.qq.com/"
 
 QR_SELECTORS = [
@@ -24,23 +22,6 @@ QR_SELECTORS = [
     "img[src*='qr']",
 ]
 
-AVATAR_SELECTORS = [
-    ".wr_avatar",
-    ".wr_avatar_img",
-    "img.wr_avatar",
-    "[class*='avatar'] img",
-    "[class*='avatar']",
-]
-
-UPLOAD_BUTTON_SELECTORS = [
-    ".shelf_upload",
-    "text=传书",
-    "text=从电脑导入",
-    "button:has-text('传书')",
-    "button:has-text('从电脑导入')",
-    "a:has-text('传书')",
-]
-
 LOGIN_ENTRY_SELECTORS = [
     "text=登录",
     "text=立即登录",
@@ -49,42 +30,22 @@ LOGIN_ENTRY_SELECTORS = [
     "div:has-text('登录')",
 ]
 
+SUCCESS_HINT_SELECTORS = [
+    ".wr_avatar",
+    ".wr_avatar_img",
+    ".shelf_upload",
+    "text=传书",
+    "text=从电脑导入",
+]
+
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def session_file_usable() -> bool:
-    if not STATE_PATH.exists():
-        return False
-    try:
-        payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
-    return bool(cookies)
-
-
 def is_target_closed_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return "targetclosed" in message or "has been closed" in message or "target page" in message
-
-
-def safe_page_url(page) -> str:
-    try:
-        return page.url
-    except Error:
-        return ""
-
-
-def any_selector_visible(page, selectors: list[str], timeout_ms: int = 200) -> bool:
-    for selector in selectors:
-        try:
-            if page.locator(selector).first.is_visible(timeout=timeout_ms):
-                return True
-        except Error:
-            continue
-    return False
 
 
 def click_login_if_possible(page) -> None:
@@ -122,15 +83,23 @@ def save_qr_if_changed(locator, last_hash: str | None) -> str:
     return digest
 
 
-def success_signal(page) -> tuple[bool, str]:
-    current_url = safe_page_url(page)
-    if any_selector_visible(page, AVATAR_SELECTORS):
-        return True, "检测到头像"
-    if "shelf" in current_url.lower():
-        return True, f"检测到书架 URL: {current_url}"
-    if any_selector_visible(page, UPLOAD_BUTTON_SELECTORS):
-        return True, "检测到传书按钮"
-    return False, ""
+def maybe_success_hint(page) -> bool:
+    current_url = ""
+    try:
+        current_url = page.url.lower()
+    except Error:
+        return False
+
+    if "shelf" in current_url:
+        return True
+
+    for selector in SUCCESS_HINT_SELECTORS:
+        try:
+            if page.locator(selector).first.is_visible(timeout=150):
+                return True
+        except Error:
+            continue
+    return False
 
 
 def persist_storage_state(context) -> None:
@@ -147,7 +116,7 @@ def report_success(message: str) -> None:
 def handle_possible_manual_close() -> None:
     if session_file_usable():
         report_success("检测到浏览器已关闭，Session 已在此前成功入库")
-    raise SystemExit("浏览器已关闭，且未拿到有效 Session")
+    raise SystemExit("浏览器已关闭，还没拿到有效 Session，请重新扫码")
 
 
 def try_session_first(playwright) -> bool:
@@ -159,19 +128,14 @@ def try_session_first(playwright) -> bool:
     try:
         context = browser.new_context(storage_state=str(STATE_PATH))
         page = context.new_page()
-        try:
-            page.goto(HOME_URL, wait_until="commit", timeout=15000)
-            page.wait_for_timeout(1000)
-        except Error:
-            print("已有 Session 启动失败，需要扫码登录。")
-            return False
-
-        ok, _ = success_signal(page)
+        ok, reason = verify_session(page, timeout_seconds=8)
         if ok:
-            print("Session 有效，跳过扫码")
+            print(f"Session 有效，直接进入书架。{reason}")
             return True
 
-        print("Session 已失效，需要扫码登录。")
+        print(f"旧 Session 校验失败：{reason}")
+        remove_state_file()
+        print("已删除损坏的 weread_state.json，准备重新扫码。")
         return False
     finally:
         browser.close()
@@ -189,35 +153,37 @@ def run_qr_login(playwright) -> None:
         except Error as exc:
             if is_target_closed_error(exc):
                 handle_possible_manual_close()
-            raise
+            raise SystemExit(f"登录页打开失败: {type(exc).__name__}: {exc}")
 
         last_hash = None
-        qr_refresh_deadline = time.time() + 600
+        deadline = time.time() + 900
 
-        print("二维码已准备，脚本会主动探测头像、书架 URL、传书按钮。")
-        print("一旦命中任一成功信号，立即持久化 Session。")
+        print("二维码已准备。要么直接进书架，要么就继续等，不会假装成功。")
 
-        while time.time() < qr_refresh_deadline:
+        while time.time() < deadline:
             try:
-                ok, reason = success_signal(page)
-                if ok:
-                    persist_storage_state(context)
-                    report_success(f"寻墨成功，Session 已持久化 ({reason})")
-
                 click_login_if_possible(page)
+
                 qr_locator = find_qr_locator(page)
                 if qr_locator is not None:
                     last_hash = save_qr_if_changed(qr_locator, last_hash)
                 else:
                     print("正在等待二维码出现或刷新...")
 
-                time.sleep(0.3)
+                if maybe_success_hint(page):
+                    ok, reason = verify_session(page, timeout_seconds=6)
+                    if ok:
+                        persist_storage_state(context)
+                        report_success(f"寻墨成功，Session 已持久化。{reason}")
+                    print(f"探测到疑似成功信号，但内容校验没过：{reason}")
+
+                time.sleep(0.4)
             except Error as exc:
                 if is_target_closed_error(exc):
                     handle_possible_manual_close()
-                time.sleep(0.3)
+                time.sleep(0.4)
 
-        raise SystemExit("登录超时：长时间未探测到有效登录信号")
+        raise SystemExit("登录超时：一直没验证出真实书架内容")
     finally:
         browser.close()
 
@@ -229,7 +195,7 @@ def main() -> None:
         if try_session_first(p):
             return
 
-        print("Session 无效，进入极简稳健扫码流程。")
+        print("Session 无效，老老实实出二维码重新扫码。")
         run_qr_login(p)
 
 
