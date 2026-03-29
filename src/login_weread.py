@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
 import time
 
 from playwright.sync_api import Error, sync_playwright
@@ -28,6 +29,19 @@ LOGIN_ENTRY_SELECTORS = [
     "a:has-text('登录')",
     "div:has-text('登录')",
 ]
+
+AVATAR_SELECTORS = [
+    ".wr_avatar",
+    ".wr_avatar_img",
+    "[class*='avatar']",
+    "[class*='userPhoto']",
+]
+
+SHELF_TEXT_SELECTORS = [
+    "text=我的书架",
+    "text=书架",
+]
+
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,9 +103,7 @@ def ensure_login_prompt(page) -> None:
 
 
 def persist_storage_state(context) -> None:
-    temp_state = STATE_PATH.with_suffix(".tmp.json")
-    context.storage_state(path=str(temp_state))
-    temp_state.replace(STATE_PATH)
+    context.storage_state(path=str(STATE_PATH))
 
 
 def report_success(message: str) -> None:
@@ -103,6 +115,48 @@ def handle_possible_manual_close() -> None:
     if session_file_usable():
         report_success("检测到浏览器已关闭，Session 已在此前成功入库")
     raise SystemExit("浏览器已关闭，还没拿到有效 Session，请重新扫码")
+
+
+def locator_visible(page, selectors: list[str]) -> bool:
+    for selector in selectors:
+        try:
+            if page.locator(selector).first.is_visible(timeout=200):
+                return True
+        except Error:
+            continue
+    return False
+
+
+def detect_logged_in(page) -> bool:
+    current_url = safe_page_url(page).lower().rstrip("/")
+    if current_url != HOME_URL.lower().rstrip("/"):
+        return False
+    if locator_visible(page, AVATAR_SELECTORS):
+        return True
+    if locator_visible(page, SHELF_TEXT_SELECTORS):
+        return True
+    return False
+
+
+def force_save_listener(force_save_event: threading.Event) -> None:
+    try:
+        sys.stdin.readline()
+    except Exception:
+        return
+    force_save_event.set()
+
+
+def persist_and_exit(context, page, preface: str, success_reason: str, wait_seconds: int) -> None:
+    print(preface)
+    try:
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        persist_storage_state(context)
+    except Error as exc:
+        raise SystemExit(f"Session 存盘失败: {type(exc).__name__}: {exc}")
+
+    success_url = safe_page_url(page) or HOME_URL
+    report_success(f"寻墨成功，Session 已持久化。{success_reason} 当前 URL: {success_url}")
 
 
 def try_session_first(playwright) -> bool:
@@ -141,40 +195,28 @@ def run_qr_login(playwright) -> None:
                 handle_possible_manual_close()
             raise SystemExit(f"登录页打开失败: {type(exc).__name__}: {exc}")
 
+        force_save_event = threading.Event()
+        threading.Thread(target=force_save_listener, args=(force_save_event,), daemon=True).start()
+
         last_hash = None
         deadline = time.time() + 900
-        qr_seen_once = False
 
         print("二维码已准备。要么直接进书架，要么就继续等，不会假装成功。")
+        print("如果已手动扫码成功但脚本没反应，请在终端按回车，我强行帮你存 Session 并退出。")
 
         while time.time() < deadline:
             try:
+                if force_save_event.is_set():
+                    persist_and_exit(context, page, "收到回车指令，正在强行固化 Session，别乱动...", "人工强制存盘完成。", wait_seconds=0)
+
+                if detect_logged_in(page):
+                    persist_and_exit(context, page, "检测到健哥已进场！正在加固 Session，别乱动...", "自动探测到书架/头像，登录已锁定。", wait_seconds=5)
+
                 ensure_login_prompt(page)
 
-                current_url = safe_page_url(page).lower()
                 qr_locator = find_qr_locator(page)
                 if qr_locator is not None:
-                    qr_seen_once = True
                     last_hash = save_qr_if_changed(qr_locator, last_hash)
-                else:
-                    print("首页已打开，正在等待二维码出现或刷新...")
-
-                root_url = HOME_URL.rstrip("/")
-                current_url_no_slash = current_url.rstrip("/")
-                suspected_success = False
-
-                if "shelf" in current_url:
-                    suspected_success = True
-                elif qr_seen_once and current_url_no_slash == root_url and qr_locator is None:
-                    suspected_success = True
-
-                if suspected_success:
-                    print("健哥，我看你进去了，我先等 3 秒让子弹飞一会儿，别急...")
-                    time.sleep(3)
-                    persist_storage_state(context)
-
-                    success_url = safe_page_url(page) or HOME_URL
-                    report_success(f"寻墨成功，Session 已持久化。当前 URL: {success_url}")
 
                 time.sleep(0.4)
             except Error as exc:
@@ -182,7 +224,7 @@ def run_qr_login(playwright) -> None:
                     handle_possible_manual_close()
                 time.sleep(0.4)
 
-        raise SystemExit("登录超时：一直没验证出真实书架内容")
+        raise SystemExit("登录超时：一直没拿到可落盘的登录态")
     finally:
         browser.close()
 
