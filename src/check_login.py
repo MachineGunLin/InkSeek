@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from playwright.sync_api import Error, sync_playwright
 
 from weread_session import BASE_DIR, STATE_PATH, session_file_usable, verify_session
@@ -26,10 +24,10 @@ def main() -> None:
             except Error:
                 pass
             browser.close()
-            raise SystemExit(f"登录态确实崩了，别被 login 脚本骗了。{reason}")
+            raise SystemExit(f"登录态校验失败，请重新运行 python3 src/login_weread.py。{reason}")
 
         browser.close()
-        print(f"寻墨成功，登录态有效。{reason}")
+        print(f"登录态有效。{reason}")
 
 
 if __name__ == "__main__":

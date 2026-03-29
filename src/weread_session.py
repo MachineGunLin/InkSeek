@@ -114,16 +114,16 @@ def verify_session(page, timeout_seconds: int = 10) -> tuple[bool, str]:
         login_entry = has_login_entry(page)
 
         if "shelf" in current_url.lower() and nickname:
-            return True, f"命中昵称: {nickname}"
+            return True, "检测到用户信息"
 
         if "shelf" in current_url.lower() and book_count > 0:
-            return True, f"命中书架列表: {book_count} 项"
+            return True, f"检测到书架内容: {book_count} 项"
 
         if nickname:
-            return True, f"命中昵称: {nickname}"
+            return True, "检测到用户信息"
 
         if book_count > 0:
-            return True, f"命中书架列表: {book_count} 项"
+            return True, f"检测到书架内容: {book_count} 项"
 
         last_reason = (
             f"URL={current_url or '<empty>'}, "

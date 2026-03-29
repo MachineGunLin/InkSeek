@@ -113,8 +113,8 @@ def report_success(message: str) -> None:
 
 def handle_possible_manual_close() -> None:
     if session_file_usable():
-        report_success("检测到浏览器已关闭，Session 已在此前成功入库")
-    raise SystemExit("浏览器已关闭，还没拿到有效 Session，请重新扫码")
+        report_success("检测到浏览器已关闭，Session 已保存。")
+    raise SystemExit("浏览器已关闭，尚未拿到有效 Session，请重新扫码。")
 
 
 def locator_visible(page, selectors: list[str]) -> bool:
@@ -156,7 +156,7 @@ def persist_and_exit(context, page, preface: str, success_reason: str, wait_seco
         raise SystemExit(f"Session 存盘失败: {type(exc).__name__}: {exc}")
 
     success_url = safe_page_url(page) or HOME_URL
-    report_success(f"寻墨成功，Session 已持久化。{success_reason} 当前 URL: {success_url}")
+    report_success(f"登录成功，Session 已保存。{success_reason} 当前 URL: {success_url}")
 
 
 def try_session_first(playwright) -> bool:
@@ -170,7 +170,7 @@ def try_session_first(playwright) -> bool:
         page = context.new_page()
         ok, reason = verify_session(page, timeout_seconds=8)
         if ok:
-            print(f"Session 有效，直接进入书架。{reason}")
+            print(f"Session 有效，已复用现有登录态。{reason}")
             return True
 
         print(f"旧 Session 校验失败：{reason}")
@@ -201,16 +201,16 @@ def run_qr_login(playwright) -> None:
         last_hash = None
         deadline = time.time() + 900
 
-        print("二维码已准备。要么直接进书架，要么就继续等，不会假装成功。")
-        print("如果已手动扫码成功但脚本没反应，请在终端按回车，我强行帮你存 Session 并退出。")
+        print("二维码已准备，等待扫码登录。")
+        print("如果页面已完成登录但脚本暂未响应，请在终端按回车，脚本会立即保存 Session 并退出。")
 
         while time.time() < deadline:
             try:
                 if force_save_event.is_set():
-                    persist_and_exit(context, page, "收到回车指令，正在强行固化 Session，别乱动...", "人工强制存盘完成。", wait_seconds=0)
+                    persist_and_exit(context, page, "收到人工确认，正在保存 Session，请保持当前页面。", "已根据人工确认完成 Session 保存。", wait_seconds=0)
 
                 if detect_logged_in(page):
-                    persist_and_exit(context, page, "检测到健哥已进场！正在加固 Session，别乱动...", "自动探测到书架/头像，登录已锁定。", wait_seconds=5)
+                    persist_and_exit(context, page, "检测到登录成功，正在保存 Session，请勿关闭浏览器。", "已自动检测到书架或头像。", wait_seconds=5)
 
                 ensure_login_prompt(page)
 
@@ -236,7 +236,7 @@ def main() -> None:
         if try_session_first(p):
             return
 
-        print("Session 无效，老老实实出二维码重新扫码。")
+        print("Session 无效，开始生成新的登录二维码。")
         run_qr_login(p)
 
 
