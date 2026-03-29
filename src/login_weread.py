@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import sys
 import time
-from pathlib import Path
 
 from playwright.sync_api import Error, sync_playwright
 
@@ -29,15 +28,6 @@ LOGIN_ENTRY_SELECTORS = [
     "a:has-text('登录')",
     "div:has-text('登录')",
 ]
-
-SUCCESS_HINT_SELECTORS = [
-    ".wr_avatar",
-    ".wr_avatar_img",
-    ".shelf_upload",
-    "text=传书",
-    "text=从电脑导入",
-]
-
 
 def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,23 +73,11 @@ def save_qr_if_changed(locator, last_hash: str | None) -> str:
     return digest
 
 
-def maybe_success_hint(page) -> bool:
-    current_url = ""
+def safe_page_url(page) -> str:
     try:
-        current_url = page.url.lower()
+        return page.url
     except Error:
-        return False
-
-    if "shelf" in current_url:
-        return True
-
-    for selector in SUCCESS_HINT_SELECTORS:
-        try:
-            if page.locator(selector).first.is_visible(timeout=150):
-                return True
-        except Error:
-            continue
-    return False
+        return ""
 
 
 def ensure_login_prompt(page) -> None:
@@ -165,6 +143,7 @@ def run_qr_login(playwright) -> None:
 
         last_hash = None
         deadline = time.time() + 900
+        qr_seen_once = False
 
         print("二维码已准备。要么直接进书架，要么就继续等，不会假装成功。")
 
@@ -172,18 +151,30 @@ def run_qr_login(playwright) -> None:
             try:
                 ensure_login_prompt(page)
 
+                current_url = safe_page_url(page).lower()
                 qr_locator = find_qr_locator(page)
                 if qr_locator is not None:
+                    qr_seen_once = True
                     last_hash = save_qr_if_changed(qr_locator, last_hash)
                 else:
                     print("首页已打开，正在等待二维码出现或刷新...")
 
-                if maybe_success_hint(page):
-                    ok, reason = verify_session(page, timeout_seconds=6)
-                    if ok:
-                        persist_storage_state(context)
-                        report_success(f"寻墨成功，Session 已持久化。{reason}")
-                    print(f"探测到疑似成功信号，但内容校验没过：{reason}")
+                root_url = HOME_URL.rstrip("/")
+                current_url_no_slash = current_url.rstrip("/")
+                suspected_success = False
+
+                if "shelf" in current_url:
+                    suspected_success = True
+                elif qr_seen_once and current_url_no_slash == root_url and qr_locator is None:
+                    suspected_success = True
+
+                if suspected_success:
+                    print("健哥，我看你进去了，我先等 3 秒让子弹飞一会儿，别急...")
+                    time.sleep(3)
+                    persist_storage_state(context)
+
+                    success_url = safe_page_url(page) or HOME_URL
+                    report_success(f"寻墨成功，Session 已持久化。当前 URL: {success_url}")
 
                 time.sleep(0.4)
             except Error as exc:
