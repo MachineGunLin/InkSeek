@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from pathlib import Path
 
 from playwright.sync_api import Error, TimeoutError, sync_playwright
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-STATE_PATH = DATA_DIR / "weread_state.json"
-ERROR_SCREENSHOT_PATH = DATA_DIR / "upload_error.png"
+from utils import (
+    BASE_DIR,
+    archive_file_if_needed,
+    ensure_runtime_dirs,
+    fail,
+    format_failure,
+    format_success,
+    launch_browser_context,
+)
+
+ERROR_SCREENSHOT_PATH = BASE_DIR / "data" / "upload_error.png"
 HOME_URL = "https://weread.qq.com/"
 UPLOAD_URL = "https://weread.qq.com/web/upload"
 
@@ -59,10 +65,10 @@ POPUP_CLOSE_SELECTORS = [
 ]
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="上传本地 Epub/PDF 到微信读书私有文档")
     parser.add_argument("file", help="本地文件路径，例如 data/test.epub")
-    return parser.parse_args()
+    return parser
 
 
 def body_text(page) -> str:
@@ -87,30 +93,17 @@ def safe_page_title(page) -> str:
 
 
 def save_error(page, reason: str, exc: Exception | None = None) -> None:
-    print(reason)
+    message = reason if reason.startswith("寻墨中断：") else format_failure(reason)
+    print(message)
     if exc is not None:
         print(f"异常详情: {type(exc).__name__}: {exc}")
     print(f"当前 URL: {safe_page_url(page)}")
     print(f"页面标题: {safe_page_title(page)}")
     try:
         page.screenshot(path=str(ERROR_SCREENSHOT_PATH), full_page=True)
-        print(f"错误截图: {ERROR_SCREENSHOT_PATH.resolve()}")
+        print(format_failure(f"错误截图已保存: {ERROR_SCREENSHOT_PATH.resolve()}"))
     except Error:
         pass
-
-
-def load_state_or_exit() -> None:
-    if not STATE_PATH.exists():
-        raise SystemExit("未找到 Session，请运行 python3 src/login_weread.py")
-
-    try:
-        payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Session 文件损坏，请运行 python3 src/login_weread.py: {exc}")
-
-    cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
-    if not cookies:
-        raise SystemExit("Session 为空，请运行 python3 src/login_weread.py")
 
 
 def resolve_file_or_exit(file_arg: str) -> Path:
@@ -119,10 +112,10 @@ def resolve_file_or_exit(file_arg: str) -> Path:
         file_path = (BASE_DIR / file_path).resolve()
 
     if not file_path.exists() or not file_path.is_file():
-        raise SystemExit(f"文件不存在: {file_path}")
+        fail(f"文件不存在: {file_path}")
 
     if file_path.suffix.lower() not in {".epub", ".pdf"}:
-        raise SystemExit("仅支持 .epub 或 .pdf 文件")
+        fail("仅支持 .epub 或 .pdf 文件")
 
     return file_path
 
@@ -205,7 +198,7 @@ def wait_upload_input(page, timeout_seconds: int = 10):
         if file_input is not None:
             return file_input
         if has_login_marker(page):
-            raise SystemExit("登录态已失效，请重新运行 python3 src/login_weread.py")
+            fail("登录态已失效，请重新运行 python3 main.py login")
         time.sleep(0.3)
     return None
 
@@ -217,7 +210,7 @@ def wait_upload_page_ready(page, timeout_seconds: int = 10) -> None:
         if page_is_404(page):
             return
         if has_login_marker(page):
-            raise SystemExit("登录态已失效，请重新运行 python3 src/login_weread.py")
+            fail("登录态已失效，请重新运行 python3 main.py login")
         if find_file_input(page) is not None or has_upload_page_marker(page):
             return
         time.sleep(0.3)
@@ -230,10 +223,10 @@ def open_homepage(page) -> None:
         dismiss_popups(page)
     except Error as exc:
         save_error(page, "访问首页失败", exc)
-        raise SystemExit("访问首页失败")
+        fail("访问首页失败")
 
     if has_login_marker(page):
-        raise SystemExit("登录态已失效，请重新运行 python3 src/login_weread.py")
+        fail("登录态已失效，请重新运行 python3 main.py login")
 
 
 def goto_upload_page(page) -> None:
@@ -243,11 +236,11 @@ def goto_upload_page(page) -> None:
         wait_upload_page_ready(page, timeout_seconds=8)
     except Error as exc:
         save_error(page, "访问上传页失败", exc)
-        raise SystemExit("访问上传页失败")
+        fail("访问上传页失败")
 
     if page_is_404(page):
         save_error(page, "上传页返回 404")
-        raise SystemExit("上传页返回 404，未找到可用上传入口")
+        fail("上传页返回 404，未找到可用上传入口")
 
 
 def open_upload_page(page) -> None:
@@ -293,7 +286,7 @@ def resolve_upload_input(page):
         if file_input is not None:
             return file_input
 
-    raise SystemExit("已进入上传流程，但未找到可用的文件选择控件")
+    fail("已进入上传流程，但未找到可用的文件选择控件")
 
 
 def wait_upload_success(page, file_name: str, timeout_seconds: int = 30) -> bool:
@@ -310,7 +303,7 @@ def wait_upload_success(page, file_name: str, timeout_seconds: int = 30) -> bool
         dismiss_popups(page)
         text = body_text(page)
         if has_login_marker(page):
-            raise SystemExit("登录态已失效，请重新运行 python3 src/login_weread.py")
+            fail("登录态已失效，请重新运行 python3 main.py login")
         if any(marker in text for marker in UPLOAD_SUCCESS_MARKERS):
             return True
         if file_name in text and "立即阅读" in text:
@@ -319,14 +312,17 @@ def wait_upload_success(page, file_name: str, timeout_seconds: int = 30) -> bool
     return False
 
 
-def main() -> None:
-    args = parse_args()
-    file_path = resolve_file_or_exit(args.file)
-    load_state_or_exit()
+def run_upload(file_arg: str) -> None:
+    ensure_runtime_dirs()
+    file_path = resolve_file_or_exit(file_arg)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=str(STATE_PATH), user_agent=REAL_BROWSER_UA)
+    with sync_playwright() as playwright:
+        browser, context = launch_browser_context(
+            playwright,
+            headless=True,
+            use_storage_state=True,
+            user_agent=REAL_BROWSER_UA,
+        )
         page = context.new_page()
         page.on("dialog", lambda dialog: dialog.dismiss())
 
@@ -344,17 +340,28 @@ def main() -> None:
         except Error as exc:
             save_error(page, f"无法注入上传文件: {file_path}", exc)
             browser.close()
-            raise SystemExit("上传失败，请检查上传入口")
+            fail("上传失败，请检查上传入口")
 
         print(f"开始上传文件: {file_path}")
         success = wait_upload_success(page, file_path.name, timeout_seconds=30)
         if not success:
             save_error(page, "上传页已打开，但未等到导入完成信号")
             browser.close()
-            raise SystemExit("上传页已打开，但未等到导入完成信号")
+            fail("上传页已打开，但未等到导入完成信号")
 
         browser.close()
-        print("文件上传指令已发出，请在微信读书中确认。")
+
+    archived_path = archive_file_if_needed(file_path)
+    if archived_path is not None:
+        print(format_success(f"文件上传指令已发出，请在微信读书中确认。文件已归档至 {archived_path.relative_to(BASE_DIR)}"))
+        return
+
+    print(format_success("文件上传指令已发出，请在微信读书中确认。"))
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    run_upload(args.file)
 
 
 if __name__ == "__main__":

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 from playwright.sync_api import Error
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-STATE_PATH = DATA_DIR / "weread_state.json"
+from utils import STATE_PATH, ensure_runtime_dirs
+
 HOME_URL = "https://weread.qq.com/"
 
 NICKNAME_SELECTORS = [
@@ -39,12 +37,15 @@ LOGIN_ENTRY_SELECTORS = [
 
 
 def session_file_usable() -> bool:
+    ensure_runtime_dirs()
     if not STATE_PATH.exists():
         return False
+
     try:
         payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return False
+
     cookies = payload.get("cookies", []) if isinstance(payload, dict) else []
     return bool(cookies)
 
@@ -99,7 +100,7 @@ def has_login_entry(page) -> bool:
 
 def verify_session(page, timeout_seconds: int = 10) -> tuple[bool, str]:
     deadline = time.time() + timeout_seconds
-    last_reason = "未拿到书架内容"
+    last_reason = "未检测到首页阅读内容"
 
     try:
         page.goto(HOME_URL, wait_until="commit", timeout=20000)

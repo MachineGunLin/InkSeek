@@ -1,5 +1,11 @@
+.env
 __pycache__/
 *.py[cod]
 
+data/*.json
 data/*.png
-data/weread_state.json
+data/*.epub
+data/downloads/*
+!data/downloads/.gitkeep
+data/archive/*
+!data/archive/.gitkeep

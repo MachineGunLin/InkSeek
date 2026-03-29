@@ -7,7 +7,8 @@ import time
 
 from playwright.sync_api import Error, sync_playwright
 
-from weread_session import DATA_DIR, STATE_PATH, remove_state_file, session_file_usable, verify_session
+from utils import DATA_DIR, STATE_PATH, ensure_runtime_dirs, fail, format_success, launch_browser_context
+from weread_session import remove_state_file, session_file_usable, verify_session
 
 QR_PATH = DATA_DIR / "login_qr.png"
 HOME_URL = "https://weread.qq.com/"
@@ -41,10 +42,6 @@ SHELF_TEXT_SELECTORS = [
     "text=我的书架",
     "text=书架",
 ]
-
-
-def ensure_data_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def is_target_closed_error(exc: BaseException) -> bool:
@@ -102,19 +99,15 @@ def ensure_login_prompt(page) -> None:
         pass
 
 
-def persist_storage_state(context) -> None:
-    context.storage_state(path=str(STATE_PATH))
-
-
 def report_success(message: str) -> None:
-    print(message)
+    print(format_success(message))
     sys.exit(0)
 
 
 def handle_possible_manual_close() -> None:
     if session_file_usable():
-        report_success("检测到浏览器已关闭，Session 已保存。")
-    raise SystemExit("浏览器已关闭，尚未拿到有效 Session，请重新扫码。")
+        report_success("浏览器已关闭，Session 已保存。")
+    fail("浏览器已关闭，尚未拿到有效 Session，请重新扫码。")
 
 
 def locator_visible(page, selectors: list[str]) -> bool:
@@ -146,17 +139,17 @@ def force_save_listener(force_save_event: threading.Event) -> None:
     force_save_event.set()
 
 
-def persist_and_exit(context, page, preface: str, success_reason: str, wait_seconds: int) -> None:
-    print(preface)
+def persist_and_exit(context, page, prompt: str, result: str, wait_seconds: int) -> None:
+    print(prompt)
     try:
         if wait_seconds > 0:
             time.sleep(wait_seconds)
-        persist_storage_state(context)
+        context.storage_state(path=str(STATE_PATH))
     except Error as exc:
-        raise SystemExit(f"Session 存盘失败: {type(exc).__name__}: {exc}")
+        fail(f"Session 存盘失败: {type(exc).__name__}: {exc}")
 
     success_url = safe_page_url(page) or HOME_URL
-    report_success(f"登录成功，Session 已保存。{success_reason} 当前 URL: {success_url}")
+    report_success(f"Session 已保存。{result} 当前 URL: {success_url}")
 
 
 def try_session_first(playwright) -> bool:
@@ -164,16 +157,15 @@ def try_session_first(playwright) -> bool:
         print("未发现可用 Session，需要扫码登录。")
         return False
 
-    browser = playwright.chromium.launch(headless=True)
+    browser, context = launch_browser_context(playwright, headless=True, use_storage_state=True)
     try:
-        context = browser.new_context(storage_state=str(STATE_PATH))
         page = context.new_page()
         ok, reason = verify_session(page, timeout_seconds=8)
         if ok:
-            print(f"Session 有效，已复用现有登录态。{reason}")
+            print(format_success(f"已复用现有登录态。{reason}"))
             return True
 
-        print(f"旧 Session 校验失败：{reason}")
+        print(f"已有 Session 校验结果异常：{reason}")
         remove_state_file()
         print("已删除损坏的 weread_state.json，准备重新扫码。")
         return False
@@ -182,9 +174,8 @@ def try_session_first(playwright) -> bool:
 
 
 def run_qr_login(playwright) -> None:
-    browser = playwright.chromium.launch(headless=False)
+    browser, context = launch_browser_context(playwright, headless=False, use_storage_state=False)
     try:
-        context = browser.new_context()
         page = context.new_page()
 
         try:
@@ -193,7 +184,7 @@ def run_qr_login(playwright) -> None:
         except Error as exc:
             if is_target_closed_error(exc):
                 handle_possible_manual_close()
-            raise SystemExit(f"登录页打开失败: {type(exc).__name__}: {exc}")
+            fail(f"登录页打开失败: {type(exc).__name__}: {exc}")
 
         force_save_event = threading.Event()
         threading.Thread(target=force_save_listener, args=(force_save_event,), daemon=True).start()
@@ -207,10 +198,10 @@ def run_qr_login(playwright) -> None:
         while time.time() < deadline:
             try:
                 if force_save_event.is_set():
-                    persist_and_exit(context, page, "收到人工确认，正在保存 Session，请保持当前页面。", "已根据人工确认完成 Session 保存。", wait_seconds=0)
+                    persist_and_exit(context, page, "收到人工确认，正在保存 Session。", "已根据人工确认完成 Session 保存。", wait_seconds=0)
 
                 if detect_logged_in(page):
-                    persist_and_exit(context, page, "检测到登录成功，正在保存 Session，请勿关闭浏览器。", "已自动检测到书架或头像。", wait_seconds=5)
+                    persist_and_exit(context, page, "检测到可用登录态，正在保存 Session。", "已自动检测到书架或头像。", wait_seconds=5)
 
                 ensure_login_prompt(page)
 
@@ -224,20 +215,24 @@ def run_qr_login(playwright) -> None:
                     handle_possible_manual_close()
                 time.sleep(0.4)
 
-        raise SystemExit("登录超时：一直没拿到可落盘的登录态")
+        fail("登录超时：一直未拿到可落盘的登录态。")
     finally:
         browser.close()
 
 
-def main() -> None:
-    ensure_data_dir()
+def run_login() -> None:
+    ensure_runtime_dirs()
 
-    with sync_playwright() as p:
-        if try_session_first(p):
+    with sync_playwright() as playwright:
+        if try_session_first(playwright):
             return
 
-        print("Session 无效，开始生成新的登录二维码。")
-        run_qr_login(p)
+        print("现有 Session 不可用，开始生成新的登录二维码。")
+        run_qr_login(playwright)
+
+
+def main() -> None:
+    run_login()
 
 
 if __name__ == "__main__":
