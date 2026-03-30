@@ -16,6 +16,7 @@ from utils import (
     log_failure,
     log_info,
     log_success,
+    save_masked_page_screenshot,
 )
 
 ERROR_SCREENSHOT_PATH = BASE_DIR / "data" / "upload_error.png"
@@ -102,7 +103,7 @@ def save_error(page, reason: str, exc: Exception | None = None) -> None:
     log_info(f"当前 URL: {safe_page_url(page)}")
     log_info(f"页面标题: {safe_page_title(page)}")
     try:
-        page.screenshot(path=str(ERROR_SCREENSHOT_PATH), full_page=True)
+        save_masked_page_screenshot(page, ERROR_SCREENSHOT_PATH, full_page=True)
         log_failure(f"错误截图已保存: {ERROR_SCREENSHOT_PATH.resolve()}")
     except Error:
         pass

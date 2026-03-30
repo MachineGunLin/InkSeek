@@ -19,6 +19,7 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+SCREENSHOT_MASK_ID = "__inkseek_privacy_mask__"
 
 
 def ensure_runtime_dirs() -> None:
@@ -168,6 +169,51 @@ def archive_file_if_needed(file_path: Path) -> Path | None:
     target = unique_path(ARCHIVE_DIR / resolved.name)
     shutil.move(str(resolved), str(target))
     return target
+
+
+def save_masked_page_screenshot(page, path: Path, *, full_page: bool = True, mask_width: int = 360, mask_height: int = 140) -> None:
+    page.evaluate(
+        """
+        ({ maskId, width, height }) => {
+          let mask = document.getElementById(maskId);
+          if (!mask) {
+            mask = document.createElement('div');
+            mask.id = maskId;
+            document.body.appendChild(mask);
+          }
+          Object.assign(mask.style, {
+            position: 'fixed',
+            top: '0',
+            left: '0',
+            width: `${width}px`,
+            height: `${height}px`,
+            background: '#f5f5f5',
+            opacity: '0.96',
+            zIndex: '2147483647',
+            pointerEvents: 'none',
+          });
+        }
+        """,
+        {
+            "maskId": SCREENSHOT_MASK_ID,
+            "width": mask_width,
+            "height": mask_height,
+        },
+    )
+    try:
+        page.screenshot(path=str(path), full_page=full_page)
+    finally:
+        page.evaluate(
+            """
+            maskId => {
+              const mask = document.getElementById(maskId);
+              if (mask) {
+                mask.remove();
+              }
+            }
+            """,
+            SCREENSHOT_MASK_ID,
+        )
 
 
 def download_binary(url: str, destination: Path, user_agent: str | None = None, timeout: int = 60) -> Path:

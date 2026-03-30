@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from playwright.sync_api import Error, sync_playwright
 
-from utils import BASE_DIR, ensure_runtime_dirs, fail, log_failure, log_success, launch_browser_context
+from utils import BASE_DIR, ensure_runtime_dirs, fail, log_failure, log_success, launch_browser_context, save_masked_page_screenshot
 from weread_session import session_file_usable, verify_session
 
 FINAL_ERROR_PATH = BASE_DIR / "data" / "final_error.png"
@@ -21,7 +21,7 @@ def run_check() -> None:
         ok, reason = verify_session(page, timeout_seconds=10)
         if not ok:
             try:
-                page.screenshot(path=str(FINAL_ERROR_PATH), full_page=True)
+                save_masked_page_screenshot(page, FINAL_ERROR_PATH, full_page=True)
                 log_failure(f"失败截图已保存: {FINAL_ERROR_PATH.resolve()}")
             except Error:
                 pass
