@@ -31,6 +31,7 @@ class PendingSelection:
     chat_id: int
     user_id: int
     preparation: WeReadSeekPreparation
+    page_index: int = 0
     timeout_task: asyncio.Task | None = None
 
 
@@ -159,6 +160,16 @@ async def execute_pending_selection(
     await send_text_with_retry(context, chat_id, result)
 
 
+async def send_selection_page(message, pending: PendingSelection) -> None:
+    await reply_with_retry(
+        message,
+        format_candidate_options(
+            pending.preparation.candidates,
+            page_index=pending.page_index,
+        ),
+    )
+
+
 async def auto_select_after_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int, query: str) -> None:
     try:
         await asyncio.sleep(SELECTION_TIMEOUT_SECONDS)
@@ -215,7 +226,7 @@ async def start_selection_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     set_pending_selection(context, pending)
     pending.timeout_task = asyncio.create_task(auto_select_after_timeout(context, message.chat_id, preparation.query))
-    await reply_with_retry(message, format_candidate_options(preparation.candidates))
+    await send_selection_page(message, pending)
 
 
 async def handle_selection_input(
@@ -228,8 +239,20 @@ async def handle_selection_input(
     if message is None:
         return
 
+    normalized_text = text.strip().lower()
+    if normalized_text in {"下一页", "更多", "查看更多", "next"}:
+        max_page = max((len(pending.preparation.candidates) - 1) // 5, 0)
+        pending.page_index = min(pending.page_index + 1, max_page)
+        await send_selection_page(message, pending)
+        return
+
+    if normalized_text in {"上一页", "prev", "previous"}:
+        pending.page_index = max(pending.page_index - 1, 0)
+        await send_selection_page(message, pending)
+        return
+
     if not text.isdigit():
-        await reply_with_retry(message, "当前正在等待选书，请回复 1-3。60 秒未回复时我会自动选择推荐值最高的版本。")
+        await reply_with_retry(message, "当前正在等待选书，请回复数字，或输入“下一页 / 上一页”翻页。60 秒未回复时我会自动选择推荐值最高的版本。")
         return
 
     selection = int(text)

@@ -14,6 +14,8 @@ from weread_search import (
     select_highest_rated,
 )
 
+PAGE_SIZE = 5
+
 
 def prepare_seek_request(query: str) -> WeReadSeekPreparation:
     ensure_runtime_dirs()
@@ -22,7 +24,7 @@ def prepare_seek_request(query: str) -> WeReadSeekPreparation:
         fail("检索关键词不能为空")
 
     log_info("正在翻阅微信读书...")
-    preparation = prepare_seek_selection(normalized_query, limit=3)
+    preparation = prepare_seek_selection(normalized_query, limit=15)
     if preparation.state == STATE_DUPLICATE_FOUND and preparation.duplicate is not None:
         log_success(f"书架已存在《{preparation.duplicate.title}》，无需重复入库。")
         return preparation
@@ -35,13 +37,30 @@ def prepare_seek_request(query: str) -> WeReadSeekPreparation:
     return preparation
 
 
-def format_candidate_options(candidates: list[WeReadCandidate]) -> str:
-    lines = ["站内检索到以下版本，请回复数字选择："]
-    for index, candidate in enumerate(candidates, start=1):
+def format_candidate_options(candidates: list[WeReadCandidate], page_index: int = 0, page_size: int = PAGE_SIZE) -> str:
+    if not candidates:
+        return "当前没有可选版本。"
+
+    total_pages = max((len(candidates) - 1) // page_size + 1, 1)
+    current_page = max(0, min(page_index, total_pages - 1))
+    start = current_page * page_size
+    end = min(start + page_size, len(candidates))
+
+    lines = [f"站内检索到以下版本，请回复数字选择：第 {current_page + 1}/{total_pages} 页"]
+    for index in range(start, end):
+        candidate = candidates[index]
         translator = candidate.translator or "未标注"
         lines.append(
-            f"{index}. {candidate.title} | 译者：{translator} | 推荐值：{candidate.rating:.1f}%"
+            f"{index + 1}. {candidate.title} | 译者：{translator} | 推荐值：{candidate.rating:.1f}%"
         )
+    if total_pages > 1:
+        controls: list[str] = []
+        if current_page + 1 < total_pages:
+            controls.append("回复“下一页”查看更多")
+        if current_page > 0:
+            controls.append("回复“上一页”返回前页")
+        if controls:
+            lines.append("；".join(controls))
     lines.append("60 秒未回复时，我会自动选择推荐值最高的版本。")
     return "\n".join(lines)
 

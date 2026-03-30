@@ -7,6 +7,7 @@ from urllib.parse import quote_plus, urljoin
 
 from playwright.sync_api import Error, sync_playwright
 
+from cover_service import ensure_epub_cover
 from upload_weread import run_upload
 from utils import (
     BASE_DIR,
@@ -236,7 +237,8 @@ def run_seek(query: str) -> None:
     match = find_best_match(search_query)
     log_info(f"已命中资源：{match.title} / {match.author} ({SOURCE_NAME})")
     download_path = download_match(match)
-    run_upload(download_path)
+    covered_path = ensure_epub_cover(download_path, title=match.title, author=match.author)
+    run_upload(str(covered_path))
 
 
 def main() -> None:
