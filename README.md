@@ -8,6 +8,7 @@
 cp .env.example .env
 python3 main.py login
 python3 main.py check
+python3 main.py seek "Frankenstein"
 python3 main.py upload <path-to-file>
 ```
 
@@ -17,6 +18,7 @@ python3 main.py upload <path-to-file>
 | --- | --- |
 | `python3 main.py login` | 打开微信读书登录页并保存 Session |
 | `python3 main.py check` | 校验当前 Session 是否可用 |
+| `python3 main.py seek "书名"` | 从公开书源检索 EPUB，下载后自动上传并归档 |
 | `python3 main.py upload <path>` | 上传文件到微信读书，成功后自动归档到 `data/archive/` |
 
 ## 目录结构
@@ -31,4 +33,4 @@ python3 main.py upload <path-to-file>
 
 - [已完成] 微信读书全链路自动化。
 - [已完成] 项目架构脱敏与标准化。
-- [等待中] Z-Library Telegram 桥接（受限于 API 风控）。
+- [进行中] 接入公开书源桥接（替代 TG 方案）。

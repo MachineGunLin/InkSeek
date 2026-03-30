@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -10,6 +12,11 @@ DOWNLOADS_DIR = DATA_DIR / "downloads"
 ARCHIVE_DIR = DATA_DIR / "archive"
 CONFIG_DIR = BASE_DIR / "config"
 STATE_PATH = DATA_DIR / "weread_state.json"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 def ensure_runtime_dirs() -> None:
@@ -51,9 +58,9 @@ def load_state_payload(required: bool = True) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def browser_context_kwargs(use_storage_state: bool = False, user_agent: str | None = None) -> dict:
+def browser_context_kwargs(use_storage_state: bool = False, user_agent: str | None = None, **extra_kwargs) -> dict:
     ensure_runtime_dirs()
-    kwargs: dict[str, str] = {}
+    kwargs: dict[str, object] = dict(extra_kwargs)
 
     if use_storage_state:
         load_state_payload(required=True)
@@ -65,10 +72,22 @@ def browser_context_kwargs(use_storage_state: bool = False, user_agent: str | No
     return kwargs
 
 
-def launch_browser_context(playwright, *, headless: bool, use_storage_state: bool = False, user_agent: str | None = None):
+def launch_browser_context(playwright, *, headless: bool, use_storage_state: bool = False, user_agent: str | None = None, **context_kwargs):
     browser = playwright.chromium.launch(headless=headless)
-    context = browser.new_context(**browser_context_kwargs(use_storage_state=use_storage_state, user_agent=user_agent))
+    context = browser.new_context(
+        **browser_context_kwargs(
+            use_storage_state=use_storage_state,
+            user_agent=user_agent,
+            **context_kwargs,
+        )
+    )
     return browser, context
+
+
+def sanitize_filename(name: str, default_stem: str = "download") -> str:
+    cleaned = re.sub(r"[^\w\s.-]", "", name, flags=re.UNICODE).strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned or default_stem
 
 
 def unique_path(path: Path) -> Path:
@@ -98,3 +117,13 @@ def archive_file_if_needed(file_path: Path) -> Path | None:
     target = unique_path(ARCHIVE_DIR / resolved.name)
     shutil.move(str(resolved), str(target))
     return target
+
+
+def download_binary(url: str, destination: Path, user_agent: str | None = None, timeout: int = 60) -> Path:
+    ensure_runtime_dirs()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    request = Request(url, headers={"User-Agent": user_agent or DEFAULT_USER_AGENT})
+    with urlopen(request, timeout=timeout) as response, destination.open("wb") as file_handle:
+        shutil.copyfileobj(response, file_handle)
+    return destination
