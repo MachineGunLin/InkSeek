@@ -5,6 +5,7 @@ __pycache__/
 data/*.json
 data/*.png
 data/*.epub
+data/*.log
 data/downloads/*
 !data/downloads/.gitkeep
 data/archive/*
