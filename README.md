@@ -18,7 +18,7 @@ python3 src/bot_server.py
 | --- | --- |
 | `python3 main.py login` | 打开微信读书登录页并保存 Session |
 | `python3 main.py check` | 校验当前 Session 是否可用 |
-| `python3 main.py seek "书名"` | 从公开书源检索 EPUB，下载后自动上传并归档 |
+| `python3 main.py seek "书名"` | 先检索微信读书站内结果，未命中时再从公开书源检索 EPUB 并自动上传归档 |
 | `python3 main.py upload <path>` | 上传文件到微信读书，成功后自动归档到 `data/archive/` |
 | `python3 src/bot_server.py` | 启动 Telegram 遥控器，接收授权用户发来的书名 |
 

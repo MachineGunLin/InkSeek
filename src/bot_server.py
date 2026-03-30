@@ -26,7 +26,7 @@ def load_bot_config() -> tuple[str, int]:
     return token, allowed_user_id
 
 
-async def run_seek_subprocess(query: str) -> tuple[int, str]:
+async def run_seek_subprocess(query: str, message) -> tuple[int, str]:
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         str(MAIN_PATH),
@@ -36,9 +36,28 @@ async def run_seek_subprocess(query: str) -> tuple[int, str]:
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(ROOT_DIR),
     )
-    stdout, _ = await process.communicate()
-    output = stdout.decode("utf-8", errors="replace").strip()
-    return process.returncode or 0, output
+    stage_sent: set[str] = set()
+    output_lines: list[str] = []
+
+    assert process.stdout is not None
+    while True:
+        raw_line = await process.stdout.readline()
+        if not raw_line:
+            break
+
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+
+        output_lines.append(line)
+        log_info(f"任务输出: {line}")
+
+        if "站内无果，正在启动公开书源寻墨" in line and "external" not in stage_sent:
+            await message.reply_text("站内无果，正在启动公开书源寻墨...")
+            stage_sent.add("external")
+
+    return_code = await process.wait()
+    return return_code, "\n".join(output_lines)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -56,18 +75,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not query:
         return
 
-    await message.reply_text(f"正在为您寻墨：{query}...")
+    await message.reply_text("正在为您翻阅微信读书...")
     log_info(f"已接收远程检索任务：{query}")
 
-    return_code, output = await run_seek_subprocess(query)
-    if output:
-        log_info(f"任务输出:\n{output}")
+    return_code, output = await run_seek_subprocess(query, message)
 
     if return_code == 0:
-        await message.reply_text("寻墨成功！书已送达微信读书。")
+        if "站内已有，已为您挑选好评率最高" in output:
+            final_message = output.splitlines()[-1]
+            if "寻墨成功：" in final_message:
+                final_message = final_message.split("寻墨成功：", 1)[-1]
+            await message.reply_text(final_message)
+            return
+
+        await message.reply_text("寻墨成功！书已送达。")
         return
 
     log_failure("远程检索任务执行失败。")
+    if "未找到与" in output or "站内外均未找到" in output:
+        await message.reply_text("对不起，寻墨未果。我会继续留意这本书的信息。")
+        return
+
     await message.reply_text("寻墨失败，请查看日志。")
 
 

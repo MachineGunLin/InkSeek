@@ -11,7 +11,7 @@ if str(SRC_DIR) not in sys.path:
 
 from check_login import run_check
 from login_weread import run_login
-from annas_bridge import run_seek
+from seek_pipeline import run_seek
 from upload_weread import run_upload
 from utils import ensure_runtime_dirs
 
@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("login", help="扫码登录并保存 Session")
     subparsers.add_parser("check", help="校验当前 Session 是否有效")
-    seek_parser = subparsers.add_parser("seek", help="检索公开书源并自动上传到微信读书")
+    seek_parser = subparsers.add_parser("seek", help="优先站内检索，未命中时再走公开书源并自动上传")
     seek_parser.add_argument("query", help="书名或检索关键词")
 
     upload_parser = subparsers.add_parser("upload", help="上传本地文件到微信读书")
