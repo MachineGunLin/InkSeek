@@ -29,6 +29,6 @@ python3 main.py upload <path-to-file>
 
 ## 进度墙
 
-- [已完成] 微信读书全链路自动化（登录/校验/上传）。
+- [已完成] 微信读书全链路自动化。
 - [已完成] 项目架构脱敏与标准化。
-- [进行中] Z-Library 自动化接入（待授权）。
+- [等待中] Z-Library Telegram 桥接（受限于 API 风控）。
