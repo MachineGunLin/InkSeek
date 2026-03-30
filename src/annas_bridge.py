@@ -15,6 +15,7 @@ from utils import (
     ensure_runtime_dirs,
     fail,
     launch_browser_context,
+    log_info,
     sanitize_filename,
     unique_path,
 )
@@ -30,6 +31,11 @@ DOWNLOAD_LINK_SELECTORS = [
     "a:has-text('Advanced epub')",
     "a[href$='.epub']",
 ]
+QUERY_ALIASES = {
+    "科学怪人": "frankenstein",
+    "弗兰肯斯坦": "frankenstein",
+    "科學怪人": "frankenstein",
+}
 
 
 @dataclass
@@ -151,7 +157,7 @@ def inspect_candidate(page, detail_url: str) -> SearchMatch | None:
 
 
 def find_best_match(query: str) -> SearchMatch:
-    print("正在检索资源...")
+    log_info("正在检索资源...")
 
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
@@ -181,7 +187,7 @@ def find_best_match(query: str) -> SearchMatch:
 
 def download_match(match: SearchMatch) -> str:
     file_stem = sanitize_filename(f"{match.author}_{match.title}", default_stem="book")
-    print("正在获取文件...")
+    log_info("正在获取文件...")
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
             playwright,
@@ -213,7 +219,7 @@ def download_match(match: SearchMatch) -> str:
         browser.close()
 
     relative_path = target_path.relative_to(BASE_DIR)
-    print(f"获取文件成功：{relative_path}")
+    log_info(f"获取文件成功：{relative_path}")
     return str(target_path)
 
 
@@ -223,8 +229,12 @@ def run_seek(query: str) -> None:
     if not normalized_query:
         fail("检索关键词不能为空")
 
-    match = find_best_match(normalized_query)
-    print(f"已命中资源：{match.title} / {match.author} ({SOURCE_NAME})")
+    search_query = QUERY_ALIASES.get(normalized_query, normalized_query)
+    if search_query != normalized_query:
+        log_info(f"已将检索词标准化为: {search_query}")
+
+    match = find_best_match(search_query)
+    log_info(f"已命中资源：{match.title} / {match.author} ({SOURCE_NAME})")
     download_path = download_match(match)
     run_upload(download_path)
 

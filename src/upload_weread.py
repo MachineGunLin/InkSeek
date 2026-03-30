@@ -12,8 +12,10 @@ from utils import (
     ensure_runtime_dirs,
     fail,
     format_failure,
-    format_success,
     launch_browser_context,
+    log_failure,
+    log_info,
+    log_success,
 )
 
 ERROR_SCREENSHOT_PATH = BASE_DIR / "data" / "upload_error.png"
@@ -93,15 +95,15 @@ def safe_page_title(page) -> str:
 
 
 def save_error(page, reason: str, exc: Exception | None = None) -> None:
-    message = reason if reason.startswith("寻墨中断：") else format_failure(reason)
+    message = reason if "寻墨中断：" in reason else format_failure(reason)
     print(message)
     if exc is not None:
-        print(f"异常详情: {type(exc).__name__}: {exc}")
-    print(f"当前 URL: {safe_page_url(page)}")
-    print(f"页面标题: {safe_page_title(page)}")
+        log_info(f"异常详情: {type(exc).__name__}: {exc}")
+    log_info(f"当前 URL: {safe_page_url(page)}")
+    log_info(f"页面标题: {safe_page_title(page)}")
     try:
         page.screenshot(path=str(ERROR_SCREENSHOT_PATH), full_page=True)
-        print(format_failure(f"错误截图已保存: {ERROR_SCREENSHOT_PATH.resolve()}"))
+        log_failure(f"错误截图已保存: {ERROR_SCREENSHOT_PATH.resolve()}")
     except Error:
         pass
 
@@ -253,7 +255,7 @@ def open_upload_page(page) -> None:
         page.wait_for_timeout(1500)
         wait_upload_page_ready(page, timeout_seconds=8)
         if page_is_404(page):
-            print("检测到无效页面，正在切换到真实上传页。")
+            log_info("检测到无效页面，正在切换到真实上传页。")
         elif find_file_input(page) is not None:
             return
 
@@ -261,7 +263,7 @@ def open_upload_page(page) -> None:
         page.wait_for_timeout(1500)
         dismiss_popups(page)
         if page_is_404(page):
-            print("检测到 /shelf 页面返回 404，正在切换到真实上传页。")
+            log_info("检测到 /shelf 页面返回 404，正在切换到真实上传页。")
         else:
             if wait_upload_input(page, timeout_seconds=3) is not None:
                 return
@@ -342,7 +344,7 @@ def run_upload(file_arg: str) -> None:
             browser.close()
             fail("上传失败，请检查上传入口")
 
-        print(f"开始上传文件: {file_path}")
+        log_info(f"正在执行上传: {file_path}")
         success = wait_upload_success(page, file_path.name, timeout_seconds=30)
         if not success:
             save_error(page, "上传页已打开，但未等到导入完成信号")
@@ -353,10 +355,10 @@ def run_upload(file_arg: str) -> None:
 
     archived_path = archive_file_if_needed(file_path)
     if archived_path is not None:
-        print(format_success(f"文件上传指令已发出，请在微信读书中确认。文件已归档至 {archived_path.relative_to(BASE_DIR)}"))
+        log_success(f"文件上传指令已发出，请在微信读书中确认。文件已归档至 {archived_path.relative_to(BASE_DIR)}")
         return
 
-    print(format_success("文件上传指令已发出，请在微信读书中确认。"))
+    log_success("文件上传指令已发出，请在微信读书中确认。")
 
 
 def main() -> None:

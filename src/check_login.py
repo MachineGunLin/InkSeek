@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from playwright.sync_api import Error, sync_playwright
 
-from utils import BASE_DIR, ensure_runtime_dirs, fail, format_failure, format_success, launch_browser_context
+from utils import BASE_DIR, ensure_runtime_dirs, fail, log_failure, log_success, launch_browser_context
 from weread_session import session_file_usable, verify_session
 
 FINAL_ERROR_PATH = BASE_DIR / "data" / "final_error.png"
@@ -22,14 +22,14 @@ def run_check() -> None:
         if not ok:
             try:
                 page.screenshot(path=str(FINAL_ERROR_PATH), full_page=True)
-                print(format_failure(f"失败截图已保存: {FINAL_ERROR_PATH.resolve()}"))
+                log_failure(f"失败截图已保存: {FINAL_ERROR_PATH.resolve()}")
             except Error:
                 pass
             browser.close()
             fail(f"登录态校验失败，请重新运行 python3 main.py login。{reason}")
 
         browser.close()
-        print(format_success(f"登录态有效。{reason}"))
+        log_success(f"登录态有效。{reason}")
 
 
 def main() -> None:

@@ -5,11 +5,11 @@
 ## 快速开始
 
 ```bash
-cp .env.example .env
 python3 main.py login
 python3 main.py check
-python3 main.py seek "Frankenstein"
+python3 main.py seek "科学怪人"
 python3 main.py upload <path-to-file>
+python3 src/bot_server.py
 ```
 
 ## 指令一览
@@ -20,6 +20,7 @@ python3 main.py upload <path-to-file>
 | `python3 main.py check` | 校验当前 Session 是否可用 |
 | `python3 main.py seek "书名"` | 从公开书源检索 EPUB，下载后自动上传并归档 |
 | `python3 main.py upload <path>` | 上传文件到微信读书，成功后自动归档到 `data/archive/` |
+| `python3 src/bot_server.py` | 启动 Telegram 遥控器，接收授权用户发来的书名 |
 
 ## 目录结构
 
@@ -29,8 +30,15 @@ python3 main.py upload <path-to-file>
 - `data/archive/`：上传完成后的归档目录
 - `config/`：配置目录
 
+## 运行配置
+
+- 在根目录准备 `.env`
+- Telegram 遥控器需要 `TELEGRAM_BOT_TOKEN` 与 `ALLOWED_USER_ID`
+- 微信读书上传仍依赖已有登录 Session
+
 ## 进度墙
 
 - [已完成] 微信读书全链路自动化。
 - [已完成] 项目架构脱敏与标准化。
+- [已完成] Telegram 遥控器部署。
 - [进行中] 接入公开书源桥接（替代 TG 方案）。

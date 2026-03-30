@@ -7,7 +7,7 @@ import time
 
 from playwright.sync_api import Error, sync_playwright
 
-from utils import DATA_DIR, STATE_PATH, ensure_runtime_dirs, fail, format_success, launch_browser_context
+from utils import DATA_DIR, STATE_PATH, ensure_runtime_dirs, fail, format_success, launch_browser_context, log_info
 from weread_session import remove_state_file, session_file_usable, verify_session
 
 QR_PATH = DATA_DIR / "login_qr.png"
@@ -80,7 +80,7 @@ def save_qr_if_changed(locator, last_hash: str | None) -> str:
     digest = hashlib.md5(image_bytes).hexdigest()
     if digest != last_hash:
         QR_PATH.write_bytes(image_bytes)
-        print(f"二维码已保存: {QR_PATH.resolve()}")
+        log_info(f"二维码已保存: {QR_PATH.resolve()}")
     return digest
 
 
@@ -140,7 +140,7 @@ def force_save_listener(force_save_event: threading.Event) -> None:
 
 
 def persist_and_exit(context, page, prompt: str, result: str, wait_seconds: int) -> None:
-    print(prompt)
+    log_info(prompt)
     try:
         if wait_seconds > 0:
             time.sleep(wait_seconds)
@@ -154,7 +154,7 @@ def persist_and_exit(context, page, prompt: str, result: str, wait_seconds: int)
 
 def try_session_first(playwright) -> bool:
     if not session_file_usable():
-        print("未发现可用 Session，需要扫码登录。")
+        log_info("未发现可用 Session，需要扫码登录。")
         return False
 
     browser, context = launch_browser_context(playwright, headless=True, use_storage_state=True)
@@ -165,9 +165,9 @@ def try_session_first(playwright) -> bool:
             print(format_success(f"已复用现有登录态。{reason}"))
             return True
 
-        print(f"已有 Session 校验结果异常：{reason}")
+        log_info(f"已有 Session 校验结果异常：{reason}")
         remove_state_file()
-        print("已删除损坏的 weread_state.json，准备重新扫码。")
+        log_info("已删除损坏的 weread_state.json，准备重新扫码。")
         return False
     finally:
         browser.close()
@@ -192,8 +192,8 @@ def run_qr_login(playwright) -> None:
         last_hash = None
         deadline = time.time() + 900
 
-        print("二维码已准备，等待扫码登录。")
-        print("如果页面已完成登录但脚本暂未响应，请在终端按回车，脚本会立即保存 Session 并退出。")
+        log_info("二维码已准备，等待扫码登录。")
+        log_info("如果页面已完成登录但脚本暂未响应，请在终端按回车，脚本会立即保存 Session 并退出。")
 
         while time.time() < deadline:
             try:
@@ -227,7 +227,7 @@ def run_login() -> None:
         if try_session_first(playwright):
             return
 
-        print("现有 Session 不可用，开始生成新的登录二维码。")
+        log_info("现有 Session 不可用，开始生成新的登录二维码。")
         run_qr_login(playwright)
 
 

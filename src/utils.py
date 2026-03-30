@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -24,16 +26,65 @@ def ensure_runtime_dirs() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_info(message: str) -> str:
+    return f"[{timestamp()}] {message}"
+
+
 def format_success(message: str) -> str:
-    return f"寻墨成功：{message}"
+    return f"[{timestamp()}] 寻墨成功：{message}"
 
 
 def format_failure(message: str) -> str:
-    return f"寻墨中断：{message}"
+    return f"[{timestamp()}] 寻墨中断：{message}"
+
+
+def log_info(message: str) -> None:
+    print(format_info(message))
+
+
+def log_success(message: str) -> None:
+    print(format_success(message))
+
+
+def log_failure(message: str) -> None:
+    print(format_failure(message))
 
 
 def fail(message: str) -> None:
     raise SystemExit(format_failure(message))
+
+
+def load_env_file() -> dict[str, str]:
+    env_path = BASE_DIR / ".env"
+    loaded: dict[str, str] = {}
+    if not env_path.exists():
+        return loaded
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        os.environ.setdefault(key, value)
+        loaded[key] = os.environ.get(key, value)
+
+    return loaded
+
+
+def require_env(name: str) -> str:
+    load_env_file()
+    value = os.environ.get(name, "").strip()
+    if not value:
+        fail(f"缺少环境变量：{name}")
+    return value
 
 
 def load_state_payload(required: bool = True) -> dict:
