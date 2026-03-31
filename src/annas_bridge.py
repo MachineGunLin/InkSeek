@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from urllib.parse import quote_plus, urljoin
 
 from playwright.sync_api import Error, sync_playwright
+from bs4 import BeautifulSoup
 
 from cover_service import ensure_epub_cover
 from upload_weread import run_upload
@@ -21,17 +22,13 @@ from utils import (
     unique_path,
 )
 
-SEARCH_URL_TEMPLATE = "https://standardebooks.org/ebooks?query={query}"
-SOURCE_NAME = "Standard Ebooks"
-DETAIL_LINK_PATTERN = re.compile(r"^/ebooks/[^/]+/[^/?#]+/?$")
+BASE_URL = "https://annas-archive.gl"
+SEARCH_URL_TEMPLATE = f"{BASE_URL}/search?q={{query}}&ext=epub"
+SOURCE_NAME = "Anna's Archive"
+DETAIL_LINK_PATTERN = re.compile(r"^/md5/[0-9a-f]{32}$")
 
-TITLE_SELECTORS = ["h1"]
-AUTHOR_SELECTORS = ["h2", ".author"]
-DOWNLOAD_LINK_SELECTORS = [
-    "a:has-text('Compatible epub')",
-    "a:has-text('Advanced epub')",
-    "a[href$='.epub']",
-]
+TITLE_SELECTORS = ["h1", ".line-clamp-3", ".text-3xl"]
+AUTHOR_SELECTORS = [".italic", ".text-lg.italic"]
 QUERY_ALIASES = {
     "科学怪人": "frankenstein",
     "弗兰肯斯坦": "frankenstein",
@@ -44,7 +41,9 @@ class SearchMatch:
     title: str
     author: str
     detail_url: str
-    download_selector: str
+    download_url: str
+    source_name: str
+    file_size: str
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,63 +52,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def first_nonempty_text(page, selectors: list[str]) -> str:
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            text = locator.inner_text(timeout=1500).strip()
-            if text:
-                return text
-        except Error:
-            continue
-    return ""
+def extract_download_links(html_content: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html_content, "html.parser")
+    results = []
 
+    for a_tag in soup.find_all("a", href=True):
+        text = a_tag.get_text(separator=" ", strip=True)
+        if ".epub" in text.lower():
+            href = a_tag["href"]
+            url = urljoin(BASE_URL, href)
 
-def first_author_text(page) -> str:
-    try:
-        items = page.locator("a[href^='/ebooks/']").evaluate_all(
-            """
-            els => els.map(el => ({
-              text: (el.innerText || el.textContent || '').trim(),
-              href: el.getAttribute('href')
-            }))
-            """
-        )
-    except Error:
-        return ""
+            source = "Unknown"
+            size = "Unknown"
 
-    for item in items:
-        href = (item.get("href") or "").strip()
-        text = (item.get("text") or "").strip()
-        if re.match(r"^/ebooks/[^/]+/?$", href) and text:
-            return text
-    return ""
+            match = re.search(r"^(.*?)\s*\(\.epub,\s*(.*?)\)", text, re.IGNORECASE)
+            if match:
+                raw_source = match.group(1).strip()
+                source = re.sub(r"^Option\s*#\d+:\s*", "", raw_source, flags=re.IGNORECASE).strip()
+                size = match.group(2).strip()
+            else:
+                if "(" in text:
+                    source = text.split("(")[0].strip()
+                    source = re.sub(r"^Option\s*#\d+:\s*", "", source, flags=re.IGNORECASE).strip()
+                size_match = re.search(r"(\d+(?:\.\d+)?\s*[KMG]B)", text, re.IGNORECASE)
+                if size_match:
+                    size = size_match.group(1)
+
+            results.append({"url": url, "source": source, "size": size})
+    return results
 
 
 def search_candidates(page, query: str) -> list[str]:
     search_url = SEARCH_URL_TEMPLATE.format(query=quote_plus(query))
     try:
         page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(2000)
     except Error as exc:
         fail(f"公开书源搜索页打开失败: {type(exc).__name__}: {exc}")
 
     try:
-        raw_links = page.locator("a[href^='/ebooks/']").evaluate_all(
-            """
-            els => els.map(el => ({
-              href: el.getAttribute('href'),
-              text: (el.innerText || el.textContent || '').trim()
-            }))
-            """
+        links = page.locator("a[href^='/md5/']").evaluate_all(
+            "els => els.map(el => el.getAttribute('href'))"
         )
     except Error as exc:
         fail(f"公开书源搜索结果读取失败: {type(exc).__name__}: {exc}")
 
     results: list[str] = []
     seen: set[str] = set()
-    for item in raw_links:
-        href = (item.get("href") or "").strip()
+    for href in links:
         if not DETAIL_LINK_PATTERN.match(href):
             continue
         absolute = urljoin(page.url, href)
@@ -121,39 +111,47 @@ def search_candidates(page, query: str) -> list[str]:
     return results
 
 
-def resolve_download_selector(page) -> str:
-    for selector in DOWNLOAD_LINK_SELECTORS:
-        try:
-            locator = page.locator(selector).first
-            href = locator.get_attribute("href", timeout=1500)
-            if href and href.endswith(".epub"):
-                return selector
-        except Error:
-            continue
-    return ""
-
-
 def inspect_candidate(page, detail_url: str) -> SearchMatch | None:
     try:
         page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(1500)
     except Error:
         return None
 
-    title = first_nonempty_text(page, TITLE_SELECTORS)
-    if not title:
+    # 获取标题和作者（由于AA结构多变，这里简单尝试几个选择器）
+    title = page.locator("h1").first.inner_text(timeout=2000).strip() or "Unknown Title"
+    author = "Unknown Author"
+    author_loc = page.locator(".italic").first
+    if author_loc.count() > 0:
+        author = author_loc.inner_text(timeout=1000).strip()
+
+    content = page.content()
+    options = extract_download_links(content)
+    if not options:
         return None
 
-    author = first_author_text(page) or first_nonempty_text(page, AUTHOR_SELECTORS) or "Unknown Author"
-    download_selector = resolve_download_selector(page)
-    if not download_selector:
-        return None
+    # 优先级策略：Cloudflare > IPFS > 其他
+    best_option = None
+    for opt in options:
+        src = opt["source"].lower()
+        if "cloudflare" in src:
+            best_option = opt
+            break
+    if not best_option:
+        for opt in options:
+            if "ipfs" in opt["source"].lower():
+                best_option = opt
+                break
+    if not best_option:
+        best_option = options[0]
 
     return SearchMatch(
         title=title,
         author=author,
         detail_url=detail_url,
-        download_selector=download_selector,
+        download_url=best_option["url"],
+        source_name=best_option["source"],
+        file_size=best_option["size"],
     )
 
 
@@ -188,7 +186,7 @@ def find_best_match(query: str) -> SearchMatch:
 
 def download_match(match: SearchMatch) -> str:
     file_stem = sanitize_filename(f"{match.author}_{match.title}", default_stem="book")
-    log_info("正在获取文件...")
+    log_info(f"正在从 {match.source_name} 获取文件 ({match.file_size})...")
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
             playwright,
@@ -200,10 +198,19 @@ def download_match(match: SearchMatch) -> str:
         page = context.new_page()
 
         try:
-            page.goto(match.detail_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1200)
-            with page.expect_download(timeout=30000) as download_info:
-                page.locator(match.download_selector).first.click()
+            # AA 下载通常需要点击后等待重定向或直接下载
+            page.goto(match.download_url, wait_until="domcontentloaded", timeout=45000)
+            
+            # 如果页面上有“Click here to download”之类的文字，尝试点击
+            download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download')").first
+            
+            with page.expect_download(timeout=60000) as download_info:
+                if download_btn.count() > 0:
+                    download_btn.click()
+                else:
+                    # 有些链接是直接触发下载的
+                    pass
+            
             download = download_info.value
             suggested = sanitize_filename(download.suggested_filename or file_stem, default_stem=file_stem)
             if not suggested.endswith(".epub"):
@@ -212,7 +219,7 @@ def download_match(match: SearchMatch) -> str:
             download.save_as(str(target_path))
         except Error as exc:
             browser.close()
-            fail(f"文件下载失败: {type(exc).__name__}: {exc}")
+            fail(f"文件下载过程中出错: {type(exc).__name__}: {exc}")
         except Exception as exc:
             browser.close()
             fail(f"文件下载失败: {type(exc).__name__}: {exc}")
