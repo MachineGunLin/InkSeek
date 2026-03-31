@@ -23,7 +23,29 @@ playwright install chromium
 python3 -m playwright install chromium
 ```
 
-### 2. 第一次使用：登录微信读书
+### 2. 配置 `.env`
+
+请在项目根目录新建一个 `.env` 文件，并填入以下内容：
+
+```env
+# Telegram Bot Token（从 @BotFather 获取）
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+
+# 允许使用机器人的用户 ID（从 @userinfobot 获取，多个 ID 用逗号分隔）
+ALLOWED_USER_IDS=12345678,87654321
+```
+
+来源说明：
+
+- `TELEGRAM_BOT_TOKEN`：在 Telegram 搜索并私聊 `@BotFather`，发送 `/newbot` 创建机器人，按提示完成后获取 API Token。
+- `ALLOWED_USER_IDS`：在 Telegram 私聊 `@userinfobot`，获取自己的数字 ID。这里使用白名单是出于安全考虑，避免未经授权的用户操作你的微信读书书架。
+
+操作提醒：
+
+- `.env` 文件放在项目根目录，与 [main.py](/Users/linrongjian/Desktop/ship_it/InkSeek/main.py) 同级。
+- 不要将 `.env` 上传到公开仓库。当前仓库的 [.gitignore](/Users/linrongjian/Desktop/ship_it/InkSeek/.gitignore) 已忽略该文件。
+
+### 3. 第一次使用：登录微信读书
 
 第一次使用，或登录态失效时，必须先在终端执行：
 
@@ -39,7 +61,7 @@ python3 main.py login
 python3 main.py check
 ```
 
-### 3. 使用方式
+### 4. 使用方式
 
 CLI 模式：
 
@@ -57,7 +79,7 @@ python3 src/bot_server.py
 
 启动后，直接在 Telegram 中发送书名即可触发检索流程。
 
-### 4. 常见问题 / Troubleshooting
+### 5. 常见问题 / Troubleshooting
 
 - 如果遇到 `ERR_CONNECTION_CLOSED`，请先检查本机代理设置。
 - 建议将 `weread.qq.com` 加入代理白名单，或临时关闭全局代理后再重试。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import os
 import re
 
 import httpx
@@ -41,17 +42,37 @@ class PendingSelection:
     timeout_task: asyncio.Task | None = None
 
 
-def load_bot_config() -> tuple[str, int]:
+def parse_allowed_user_ids(raw_value: str) -> set[int]:
+    user_ids: set[int] = set()
+    for chunk in raw_value.split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        try:
+            user_ids.add(int(value))
+        except ValueError as exc:
+            raise SystemExit(format_failure(f"ALLOWED_USER_IDS 不是有效整数列表: {exc}"))
+
+    if not user_ids:
+        raise SystemExit(format_failure("ALLOWED_USER_IDS 不能为空"))
+    return user_ids
+
+
+def load_bot_config() -> tuple[str, set[int]]:
     load_env_file()
     token = require_env("TELEGRAM_BOT_TOKEN")
-    allowed_user_id_raw = require_env("ALLOWED_USER_ID")
+    allowed_user_ids_raw = os.environ.get("ALLOWED_USER_IDS", "").strip()
+    if allowed_user_ids_raw:
+        return token, parse_allowed_user_ids(allowed_user_ids_raw)
+
+    allowed_user_id_raw = os.environ.get("ALLOWED_USER_ID", "").strip()
+    if not allowed_user_id_raw:
+        raise SystemExit(format_failure("缺少环境变量：ALLOWED_USER_IDS"))
 
     try:
-        allowed_user_id = int(allowed_user_id_raw)
+        return token, {int(allowed_user_id_raw)}
     except ValueError as exc:
         raise SystemExit(format_failure(f"ALLOWED_USER_ID 不是有效整数: {exc}"))
-
-    return token, allowed_user_id
 
 
 def build_request() -> HTTPXRequest:
@@ -329,8 +350,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if message is None or user is None:
         return
 
-    allowed_user_id = context.application.bot_data["allowed_user_id"]
-    if user.id != allowed_user_id:
+    allowed_user_ids = context.application.bot_data["allowed_user_ids"]
+    if user.id not in allowed_user_ids:
         log_info("已忽略未授权请求。")
         return
 
@@ -352,7 +373,7 @@ async def post_init(application) -> None:
 
 
 def main() -> None:
-    token, allowed_user_id = load_bot_config()
+    token, allowed_user_ids = load_bot_config()
     request = build_request()
     updates_request = build_request()
     application = (
@@ -363,7 +384,7 @@ def main() -> None:
         .post_init(post_init)
         .build()
     )
-    application.bot_data["allowed_user_id"] = allowed_user_id
+    application.bot_data["allowed_user_ids"] = allowed_user_ids
     application.bot_data[PENDING_SELECTIONS_KEY] = {}
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
