@@ -15,6 +15,9 @@ from seek_pipeline import (
     STATE_DUPLICATE_FOUND,
     STATE_NOT_FOUND,
     STATE_WAITING_FOR_SELECTION,
+    STATUS_UNAVAILABLE_IN_WEREAD,
+    UNAVAILABLE_IN_WEREAD_FALLBACK_MESSAGE,
+    WeReadActionError,
     WeReadSeekPreparation,
     execute_selection,
     format_candidate_options,
@@ -104,6 +107,13 @@ async def send_text_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
             await asyncio.sleep(float(attempt * 2))
 
 
+async def send_notice(context: ContextTypes.DEFAULT_TYPE, target, text: str) -> None:
+    if hasattr(target, "reply_text"):
+        await reply_with_retry(target, text)
+        return
+    await send_text_with_retry(context, int(target), text)
+
+
 def pending_selection_store(context: ContextTypes.DEFAULT_TYPE) -> dict[int, PendingSelection]:
     store = context.application.bot_data.get(PENDING_SELECTIONS_KEY)
     if isinstance(store, dict):
@@ -137,20 +147,26 @@ async def clear_pending_selection(context: ContextTypes.DEFAULT_TYPE, chat_id: i
     pending_selection_store(context).pop(chat_id, None)
 
 
-async def run_public_seek_flow(context: ContextTypes.DEFAULT_TYPE, message, query: str) -> None:
-    await reply_with_retry(message, PUBLIC_FALLBACK_MESSAGE)
+async def run_public_seek_flow(
+    context: ContextTypes.DEFAULT_TYPE,
+    target,
+    query: str,
+    *,
+    notice: str = PUBLIC_FALLBACK_MESSAGE,
+) -> None:
+    await send_notice(context, target, notice)
     try:
         await asyncio.to_thread(run_public_fallback, query)
     except SystemExit as exc:
         log_failure("公开书源寻墨失败。")
         reason = user_visible_error_message(exc)
         if "未找到与" in reason:
-            await reply_with_retry(message, "对不起，寻墨未果。我会继续留意这本书的信息。")
+            await send_notice(context, target, "对不起，寻墨未果。我会继续留意这本书的信息。")
             return
-        await reply_with_retry(message, f"寻墨中断：{reason}")
+        await send_notice(context, target, f"寻墨中断：{reason}")
         return
 
-    await reply_with_retry(message, "寻墨成功！书已送达。")
+    await send_notice(context, target, "寻墨成功！书已送达。")
 
 
 async def execute_pending_selection(
@@ -176,6 +192,17 @@ async def execute_pending_selection(
             preparation,
             selection_index=selection_index,
         )
+    except WeReadActionError as exc:
+        if exc.status != STATUS_UNAVAILABLE_IN_WEREAD:
+            raise
+        log_info(f"L1 重定向：{exc.message}")
+        await run_public_seek_flow(
+            context,
+            chat_id,
+            preparation.query,
+            notice=UNAVAILABLE_IN_WEREAD_FALLBACK_MESSAGE,
+        )
+        return
     except SystemExit as exc:
         reason = user_visible_error_message(exc)
         log_failure(f"站内选书入库失败：{reason}")

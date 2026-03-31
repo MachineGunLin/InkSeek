@@ -64,11 +64,29 @@ RESTRICTED_MARKERS = [
 ]
 READY_CONTAINER_SELECTOR = ".readerCatalog, .readerBookInfo, .readerContent"
 SHELF_PAGE_TITLE_SELECTOR = ".shelfBook .title, a.shelfBook, .wr_index_mini_shelf_card_content_title"
+DETAIL_TITLE_SELECTORS = [
+    ".bookInfo_right_header_title",
+    ".readerCatalog_bookInfo_title_txt",
+    ".readerBookInfo_head",
+    ".readerCatalog_bookInfo_right",
+]
+UNAVAILABLE_IN_WEREAD_MARKERS = [
+    "待上架",
+    "订阅",
+    "已订阅",
+    "已预订",
+    "查看更多",
+    "查看全部",
+    "去 App 查看全部",
+    "去 App 查看更多",
+]
 
 STATE_DUPLICATE_FOUND = "duplicate_found"
 STATE_WAITING_FOR_SELECTION = "waiting_for_selection"
 STATE_NOT_FOUND = "not_found"
+STATUS_UNAVAILABLE_IN_WEREAD = "unavailable_in_weread"
 TITLE_SIMILARITY_THRESHOLD = 0.6
+DETAIL_TITLE_SIMILARITY_THRESHOLD = 0.75
 
 
 @dataclass
@@ -87,6 +105,13 @@ class WeReadSeekPreparation:
     query: str
     duplicate: WeReadCandidate | None = None
     candidates: list[WeReadCandidate] = field(default_factory=list)
+
+
+class WeReadActionError(RuntimeError):
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 
 def normalize_lookup_text(value: str) -> str:
@@ -130,6 +155,10 @@ def log_title_match(query: str, title: str, score: float, accepted: bool, reason
     decision = "Accepted" if accepted else "Rejected"
     suffix = f" ({reason})" if reason else ""
     log_info(f"[Match] 输入: {query} vs 结果: {title} | Score: {score:.2f} -> {decision}{suffix}")
+
+
+def unavailable_in_weread(message: str) -> None:
+    raise WeReadActionError(STATUS_UNAVAILABLE_IN_WEREAD, message)
 
 
 def ensure_logged_in(page) -> None:
@@ -456,6 +485,46 @@ def detect_visible_action_labels(page) -> list[str]:
         return []
 
 
+def extract_detail_title(page) -> str:
+    for selector in DETAIL_TITLE_SELECTORS:
+        try:
+            text = page.locator(selector).first.inner_text(timeout=1500).strip()
+        except Error:
+            continue
+        if not text:
+            continue
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if first_line:
+            return first_line
+
+    body = page_text(page)
+    for line in body.splitlines():
+        text = line.strip()
+        if len(text) >= 2:
+            return text
+    return ""
+
+
+def ensure_detail_title_matches(page, query: str, candidate: WeReadCandidate) -> None:
+    detail_title = extract_detail_title(page)
+    if not detail_title:
+        return
+
+    score = title_similarity_score(query, detail_title)
+    normalized_query = normalize_lookup_text(query)
+    normalized_detail_title = normalize_lookup_text(detail_title)
+    accepted = score >= DETAIL_TITLE_SIMILARITY_THRESHOLD or query_matches_title(query, detail_title)
+    log_title_match(query, detail_title, score, accepted, reason="DetailPage")
+    if accepted:
+        return
+
+    candidate_score = title_similarity_score(candidate.title, detail_title)
+    if candidate_score >= DETAIL_TITLE_SIMILARITY_THRESHOLD and normalized_query in normalized_detail_title:
+        return
+
+    unavailable_in_weread(f"站内详情页标题与检索词不符，已放弃站内入库：{detail_title}")
+
+
 def click_first_visible(page, selectors: list[str]) -> tuple[str, str] | None:
     action = first_visible_action(page, selectors)
     if action is None:
@@ -486,6 +555,16 @@ def classify_book_page_state(
 
     if has_add_action:
         return "add", f"《{title}》已定位到加入书架按钮。"
+
+    unavailable_marker = next(
+        (marker for marker in UNAVAILABLE_IN_WEREAD_MARKERS if marker in body_text),
+        None,
+    )
+    if unavailable_marker is not None and not has_read_action:
+        return "unavailable", f"《{title}》当前显示“{unavailable_marker}”，站内仅为待上架占位符，无法入库。"
+
+    if "/web/bookdetail/" in url.lower() and has_ready_container and not has_add_action and not has_read_action:
+        return "unavailable", f"《{title}》当前仅展示详情占位页，未提供加入书架或阅读入口，无法站内入库。"
 
     if has_ready_container or "/web/reader/" in url.lower() or any(marker in body_text for marker in READER_READY_MARKERS):
         return "ready", f"《{title}》已进入阅读页。"
@@ -640,7 +719,7 @@ def select_highest_rated(candidates: list[WeReadCandidate]) -> WeReadCandidate:
     return max(candidates, key=lambda item: (item.rating, item.reading_count))
 
 
-def add_candidate_to_shelf(candidate: WeReadCandidate) -> str:
+def add_candidate_to_shelf(candidate: WeReadCandidate, *, query: str) -> str:
     if not candidate.href:
         fail(f"未拿到可用的书籍入口：{candidate.title}")
 
@@ -655,6 +734,7 @@ def add_candidate_to_shelf(candidate: WeReadCandidate) -> str:
         try:
             ensure_logged_in(page)
             page.goto(urljoin(HOME_URL, candidate.href), wait_until="commit", timeout=45000)
+            ensure_detail_title_matches(page, query, candidate)
             reached_read_surface = False
             clicked_add = False
             add_confirmed = False
@@ -662,12 +742,16 @@ def add_candidate_to_shelf(candidate: WeReadCandidate) -> str:
 
             for _ in range(3):
                 wait_for_book_surface(page)
+                ensure_detail_title_matches(page, query, candidate)
                 state, detail = inspect_book_page_state(page, candidate)
                 last_detail = detail
                 log_info(f"站内入库检测：{detail}")
 
                 if state == "restricted":
                     fail(detail)
+
+                if state == "unavailable":
+                    unavailable_in_weread(detail)
 
                 if state == "add":
                     log_info(f"正在点击加入书架：{candidate.title}")

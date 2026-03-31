@@ -6,7 +6,9 @@ from weread_search import (
     STATE_DUPLICATE_FOUND,
     STATE_NOT_FOUND,
     STATE_WAITING_FOR_SELECTION,
+    STATUS_UNAVAILABLE_IN_WEREAD,
     WeReadCandidate,
+    WeReadActionError,
     WeReadSeekPreparation,
     add_candidate_to_shelf,
     log_candidate_preview,
@@ -17,6 +19,7 @@ from weread_search import (
 PAGE_SIZE = 5
 SELECTION_TIMEOUT_SECONDS = 300
 PUBLIC_FALLBACK_MESSAGE = "站内未找到精准匹配，正在为您启动公开书源检索..."
+UNAVAILABLE_IN_WEREAD_FALLBACK_MESSAGE = "站内该书仅为“待上架”占位符，无法入库。正在为您启动全网寻墨..."
 
 
 def prepare_seek_request(query: str) -> WeReadSeekPreparation:
@@ -81,7 +84,7 @@ def execute_selection(preparation: WeReadSeekPreparation, *, selection_index: in
         source = "已根据您的选择完成入库"
 
     log_info(source)
-    detail = add_candidate_to_shelf(candidate)
+    detail = add_candidate_to_shelf(candidate, query=preparation.query)
     log_info(f"站内入库结果：{detail}")
     return f"《{candidate.title}》已加入书架，请去微信读书查收。"
 
@@ -97,7 +100,14 @@ def run_seek(query: str) -> None:
         return
 
     if preparation.state == STATE_WAITING_FOR_SELECTION:
-        result = execute_selection(preparation, selection_index=None)
+        try:
+            result = execute_selection(preparation, selection_index=None)
+        except WeReadActionError as exc:
+            if exc.status != STATUS_UNAVAILABLE_IN_WEREAD:
+                raise
+            log_info(UNAVAILABLE_IN_WEREAD_FALLBACK_MESSAGE)
+            run_public_fallback(preparation.query)
+            return
         log_success(result)
         return
 
