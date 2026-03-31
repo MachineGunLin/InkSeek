@@ -86,46 +86,73 @@ def extract_download_links(html_content: str) -> list[dict[str, str]]:
 def search_candidates(page, query: str) -> list[str]:
     search_url = SEARCH_URL_TEMPLATE.format(query=quote_plus(query))
     try:
-        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2000)
     except Error as exc:
         fail(f"公开书源搜索页打开失败: {type(exc).__name__}: {exc}")
 
     try:
-        # 仅限定在主搜索结果容器中提取，避免抓取顶部的“近期热门”或侧边栏
-        # AA 的主结果通常在 .flex.flex-col.gap-4 容器下
-        container = page.locator(".flex.flex-col.gap-4").first
-        if container.count() == 0:
-            # 回退到全局查找，但限制在结果项中
-            items = page.locator(".flex.pt-3.pb-3")
-        else:
-            items = container.locator(".flex.pt-3.pb-3")
-
-        raw_data = items.evaluate_all(
+        # 获取页面所有 /md5/ 链接及其标题
+        # 我们寻找 main 区域内的链接，并排除 "Recent downloads" 部分
+        raw_data = page.evaluate(
             """
-            els => els.map(el => {
-                const link = el.querySelector('a[href^="/md5/"]');
-                return {
-                    href: link ? link.getAttribute('href') : null,
-                    title: link ? (link.innerText || '').trim() : ''
+            () => {
+                const results = [];
+                // 尝试定位 "Results" 标题后的区域，或者直接在 main 中查找
+                const main = document.querySelector('main') || document.body;
+                const links = Array.from(main.querySelectorAll('a[href^="/md5/"]'));
+                
+                // 排除可能是 "Recent downloads" 的容器
+                const isRecentDownload = (el) => {
+                    let p = el.parentElement;
+                    while (p && p !== main) {
+                        if (p.innerText && p.innerText.includes('Recent downloads')) return true;
+                        p = p.parentElement;
+                    }
+                    return false;
                 };
-            }).filter(item => item.href)
+
+                links.forEach(el => {
+                    if (isRecentDownload(el)) return;
+                    results.push({
+                        href: el.getAttribute('href'),
+                        title: (el.innerText || '').trim()
+                    });
+                });
+                return results;
+            }
             """
         )
     except Error as exc:
         fail(f"公开书源搜索结果读取失败: {type(exc).__name__}: {exc}")
 
+    if not raw_data:
+        # 如果没找到，尝试最宽松的全局查找
+        raw_data = page.locator('a[href^="/md5/"]').evaluate_all(
+            "els => els.map(el => ({ href: el.getAttribute('href'), title: (el.innerText || '').trim() }))"
+        )
+
     results: list[str] = []
     seen: set[str] = set()
+    found_debug: list[str] = []
+    
+    query_words = [w.lower() for w in re.split(r"\s+", query) if w]
+
     for item in raw_data:
         href = item["href"]
         title = item["title"]
-        if not DETAIL_LINK_PATTERN.match(href):
+        if not href or not DETAIL_LINK_PATTERN.match(href):
             continue
         
-        # 标题相似度校验：过滤掉与搜索词完全不相关的推荐内容
+        found_debug.append(f"{title} ({href})")
+        
+        # 宽松匹配策略：
+        # 1. 相似度 > 0.4
+        # 2. 或者 标题包含查询词中的任何一个关键词
         similarity = difflib.SequenceMatcher(None, query.lower(), title.lower()).ratio()
-        if similarity < 0.4:
+        word_match = any(word in title.lower() for word in query_words)
+        
+        if similarity < 0.4 and not word_match:
             continue
 
         absolute = urljoin(page.url, href)
@@ -133,6 +160,11 @@ def search_candidates(page, query: str) -> list[str]:
             continue
         seen.add(absolute)
         results.append(absolute)
+
+    if not results and found_debug:
+        log_info("未发现匹配项，在此列出找到的 MD5 链接供排查：")
+        for debug_str in found_debug[:5]:
+            log_info(f"  - {debug_str}")
 
     return results
 
@@ -212,7 +244,7 @@ def find_best_match(query: str) -> SearchMatch:
 
 def download_match(match: SearchMatch) -> str:
     file_stem = sanitize_filename(f"{match.author}_{match.title}", default_stem="book")
-    log_info(f"正在从 {match.source_name} 获取文件 ({match.file_size})...")
+    log_info(f"正在准备从 {match.source_name} 获取文件...")
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
             playwright,
@@ -224,19 +256,31 @@ def download_match(match: SearchMatch) -> str:
         page = context.new_page()
 
         try:
-            # AA 下载通常需要点击后等待重定向或直接下载
-            page.goto(match.download_url, wait_until="domcontentloaded", timeout=45000)
+            # 第一步：进入下载镜像详情或慢速下载页
+            page.goto(match.download_url, wait_until="domcontentloaded", timeout=60000)
             
-            # 如果页面上有“Click here to download”之类的文字，尝试点击
-            download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now')").first
-            
-            # AA 免费/慢速通道通常有很长的准备时间或验证，这里将超时增加到 180s
+            # 检查是否进入了中间的 slow_download 页面
+            if "/slow_download/" in page.url:
+                log_info("正在排队等候慢速通道响应 (可能需要 20-60 秒)...")
+                # 等待“Download now”按钮出现，通常伴随着倒计时结束
+                # 按钮文本通常包含 "Download now" 或 图标 📚
+                final_btn_selector = "a:has-text('Download now'), a:has-text('下载'), a:has-text('📚')"
+                try:
+                    page.wait_for_selector(final_btn_selector, state="visible", timeout=180000)
+                    download_btn = page.locator(final_btn_selector).first
+                except Error:
+                    fail("等候超时：慢速下载按钮未能在 180 秒内出现。")
+            else:
+                # 可能是直接下载页或有其他“Click here”按钮
+                download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now')").first
+
+            # 触发真实文件流下载
             with page.expect_download(timeout=180000) as download_info:
                 if download_btn.count() > 0:
                     download_btn.click()
                 else:
-                    # 有些链接是直接触发下载的，或者是点击后还需要二次确认
-                    pass
+                    # 如果没找到按钮但也没触发下载，说明页面逻辑可能有变
+                    log_info("未发现显式下载按钮，尝试静默等待下载触发...")
             
             download = download_info.value
             suggested = sanitize_filename(download.suggested_filename or file_stem, default_stem=file_stem)
@@ -246,10 +290,10 @@ def download_match(match: SearchMatch) -> str:
             download.save_as(str(target_path))
         except Error as exc:
             browser.close()
-            fail(f"文件下载过程中出错: {type(exc).__name__}: {exc}")
+            fail(f"通道连接或等候超时: {type(exc).__name__}: {exc}")
         except Exception as exc:
             browser.close()
-            fail(f"文件下载失败: {type(exc).__name__}: {exc}")
+            fail(f"下载流处理失败: {type(exc).__name__}: {exc}")
 
         browser.close()
 
