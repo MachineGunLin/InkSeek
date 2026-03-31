@@ -53,6 +53,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def check_and_wait_for_captcha(page) -> None:
+    """检查是否存在人机验证，并提示人工介入"""
+    captcha_signals = [
+        "cloudflare",
+        "verify you are human",
+        "checking your browser",
+        "验证您是否是真人",
+        "人机验证",
+    ]
+    # 检查页面标题和内容
+    try:
+        title = page.title().lower()
+        content = page.content().lower()
+        if any(signal in title or signal in content for signal in captcha_signals):
+            log_info("\n" + "!" * 60)
+            log_info("[!!!] 检测到 Cloudflare 人机验证，请在浏览器窗口手动完成验证。")
+            log_info("[!!!] 验证通过后，请回到终端按 [Enter] 键继续...")
+            log_info("!" * 60 + "\n")
+            input(">>> 按回车键继续...")
+            # 验证后等待页面加载
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Error:
+        pass
+
+
 def extract_download_links(html_content: str) -> list[dict[str, str]]:
     soup = BeautifulSoup(html_content, "html.parser")
     results = []
@@ -87,6 +112,7 @@ def search_candidates(page, query: str) -> list[str]:
     search_url = SEARCH_URL_TEMPLATE.format(query=quote_plus(query))
     try:
         page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+        check_and_wait_for_captcha(page)
         page.wait_for_timeout(2000)
     except Error as exc:
         fail(f"公开书源搜索页打开失败: {type(exc).__name__}: {exc}")
@@ -172,6 +198,7 @@ def search_candidates(page, query: str) -> list[str]:
 def inspect_candidate(page, detail_url: str) -> SearchMatch | None:
     try:
         page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+        check_and_wait_for_captcha(page)
         page.wait_for_timeout(1500)
     except Error:
         return None
@@ -258,32 +285,40 @@ def download_match(match: SearchMatch) -> str:
         try:
             # 第一步：进入下载镜像详情或慢速下载页
             page.goto(match.download_url, wait_until="domcontentloaded", timeout=60000)
+            check_and_wait_for_captcha(page)
             
             # 检查是否进入了中间的 slow_download 页面
-            if "/slow_download/" in page.url:
-                log_info("正在排队等候慢速通道响应 (可能需要 20-60 秒)...")
-                # 等待“Download now”按钮出现，通常伴随着倒计时结束
-                # 按钮文本通常包含 "Download now" 或 图标 📚
-                final_btn_selector = "a:has-text('Download now'), a:has-text('下载'), a:has-text('📚')"
+            if "/slow_download/" in page.url or "/codes/" in page.url:
+                log_info("正在排队等候通道响应 (可能需要 20-60 秒，若有验证请手动点击)...")
+                # 再次检查验证
+                check_and_wait_for_captcha(page)
+                
+                # 等待“Download now”按钮从不可见到可见，或倒计时结束
+                final_btn_selector = "a:has-text('Download now'), a:has-text('下载'), a:has-text('📚'), a:has-text('🚀')"
                 try:
+                    # 提高超时到 180s，并在等待期间保持显式
                     page.wait_for_selector(final_btn_selector, state="visible", timeout=180000)
                     download_btn = page.locator(final_btn_selector).first
                 except Error:
-                    fail("等候超时：慢速下载按钮未能在 180 秒内出现。")
+                    # 如果超时了，再给一次人工确认的机会
+                    log_info("[!!!] 未自动检测到下载按钮，若此时浏览器已准备好，请手动点击或在终端确认。")
+                    input(">>> 若已看到下载按钮，请按回车尝试最后一次抓取...")
+                    download_btn = page.locator(final_btn_selector).first
+
             else:
                 # 可能是直接下载页或有其他“Click here”按钮
-                download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now')").first
+                download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now'), a:has-text('🚀')").first
 
             # 触发真实文件流下载
             # 注意：必须先设置 expect_download，再触发会导致下载的点击动作
             with page.expect_download(timeout=180000) as download_info:
                 if download_btn.count() > 0:
                     log_info("正在点击下载按钮...")
-                    download_btn.click()
+                    download_btn.click(timeout=60000)
                 else:
                     # 如果没找到按钮但也没触发下载，尝试直接寻找并点击任何看起来像下载的链接
                     log_info("未发现显式下载按钮，尝试盲点击可能触发下载的元素...")
-                    page.locator("a:has-text('Download now'), a:has-text('📚')").first.click()
+                    page.locator("a:has-text('Download now'), a:has-text('📚'), a:has-text('🚀')").first.click(timeout=60000)
             
             download = download_info.value
             suggested = sanitize_filename(download.suggested_filename or file_stem, default_stem=file_stem)
