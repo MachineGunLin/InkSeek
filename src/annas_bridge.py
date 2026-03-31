@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import difflib
 from dataclasses import dataclass
 from urllib.parse import quote_plus, urljoin
 
@@ -91,17 +92,42 @@ def search_candidates(page, query: str) -> list[str]:
         fail(f"公开书源搜索页打开失败: {type(exc).__name__}: {exc}")
 
     try:
-        links = page.locator("a[href^='/md5/']").evaluate_all(
-            "els => els.map(el => el.getAttribute('href'))"
+        # 仅限定在主搜索结果容器中提取，避免抓取顶部的“近期热门”或侧边栏
+        # AA 的主结果通常在 .flex.flex-col.gap-4 容器下
+        container = page.locator(".flex.flex-col.gap-4").first
+        if container.count() == 0:
+            # 回退到全局查找，但限制在结果项中
+            items = page.locator(".flex.pt-3.pb-3")
+        else:
+            items = container.locator(".flex.pt-3.pb-3")
+
+        raw_data = items.evaluate_all(
+            """
+            els => els.map(el => {
+                const link = el.querySelector('a[href^="/md5/"]');
+                return {
+                    href: link ? link.getAttribute('href') : null,
+                    title: link ? (link.innerText || '').trim() : ''
+                };
+            }).filter(item => item.href)
+            """
         )
     except Error as exc:
         fail(f"公开书源搜索结果读取失败: {type(exc).__name__}: {exc}")
 
     results: list[str] = []
     seen: set[str] = set()
-    for href in links:
+    for item in raw_data:
+        href = item["href"]
+        title = item["title"]
         if not DETAIL_LINK_PATTERN.match(href):
             continue
+        
+        # 标题相似度校验：过滤掉与搜索词完全不相关的推荐内容
+        similarity = difflib.SequenceMatcher(None, query.lower(), title.lower()).ratio()
+        if similarity < 0.4:
+            continue
+
         absolute = urljoin(page.url, href)
         if absolute in seen:
             continue
@@ -202,13 +228,14 @@ def download_match(match: SearchMatch) -> str:
             page.goto(match.download_url, wait_until="domcontentloaded", timeout=45000)
             
             # 如果页面上有“Click here to download”之类的文字，尝试点击
-            download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download')").first
+            download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now')").first
             
-            with page.expect_download(timeout=60000) as download_info:
+            # AA 免费/慢速通道通常有很长的准备时间或验证，这里将超时增加到 180s
+            with page.expect_download(timeout=180000) as download_info:
                 if download_btn.count() > 0:
                     download_btn.click()
                 else:
-                    # 有些链接是直接触发下载的
+                    # 有些链接是直接触发下载的，或者是点击后还需要二次确认
                     pass
             
             download = download_info.value
