@@ -219,7 +219,7 @@ def find_best_match(query: str) -> SearchMatch:
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
             playwright,
-            headless=True,
+            headless=False,
             use_storage_state=False,
             user_agent=DEFAULT_USER_AGENT,
         )
@@ -248,7 +248,7 @@ def download_match(match: SearchMatch) -> str:
     with sync_playwright() as playwright:
         browser, context = launch_browser_context(
             playwright,
-            headless=True,
+            headless=False,
             use_storage_state=False,
             user_agent=DEFAULT_USER_AGENT,
             accept_downloads=True,
@@ -275,12 +275,15 @@ def download_match(match: SearchMatch) -> str:
                 download_btn = page.locator("a:has-text('Click here'), a:has-text('下载'), a:has-text('download'), a:has-text('Download now')").first
 
             # 触发真实文件流下载
+            # 注意：必须先设置 expect_download，再触发会导致下载的点击动作
             with page.expect_download(timeout=180000) as download_info:
                 if download_btn.count() > 0:
+                    log_info("正在点击下载按钮...")
                     download_btn.click()
                 else:
-                    # 如果没找到按钮但也没触发下载，说明页面逻辑可能有变
-                    log_info("未发现显式下载按钮，尝试静默等待下载触发...")
+                    # 如果没找到按钮但也没触发下载，尝试直接寻找并点击任何看起来像下载的链接
+                    log_info("未发现显式下载按钮，尝试盲点击可能触发下载的元素...")
+                    page.locator("a:has-text('Download now'), a:has-text('📚')").first.click()
             
             download = download_info.value
             suggested = sanitize_filename(download.suggested_filename or file_stem, default_stem=file_stem)
