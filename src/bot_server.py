@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import re
 
 import httpx
 from telegram import Update
@@ -61,6 +62,19 @@ def build_request() -> HTTPXRequest:
             "transport": httpx.AsyncHTTPTransport(retries=3),
         },
     )
+
+
+def user_visible_error_message(raw: object) -> str:
+    message = str(raw).strip()
+    if not message:
+        return "发生未知异常，请稍后重试。"
+
+    message = re.sub(r"^\[[^]]+\]\s*", "", message)
+    if message.startswith("寻墨中断："):
+        message = message.split("寻墨中断：", 1)[1].strip()
+    if message.startswith("寻墨成功："):
+        message = message.split("寻墨成功：", 1)[1].strip()
+    return message or "发生未知异常，请稍后重试。"
 
 
 async def reply_with_retry(message, text: str) -> None:
@@ -129,11 +143,11 @@ async def run_public_seek_flow(context: ContextTypes.DEFAULT_TYPE, message, quer
         await asyncio.to_thread(run_public_fallback, query)
     except SystemExit as exc:
         log_failure("公开书源寻墨失败。")
-        reason = str(exc)
+        reason = user_visible_error_message(exc)
         if "未找到与" in reason:
             await reply_with_retry(message, "对不起，寻墨未果。我会继续留意这本书的信息。")
             return
-        await reply_with_retry(message, "寻墨失败，请查看日志。")
+        await reply_with_retry(message, f"寻墨中断：{reason}")
         return
 
     await reply_with_retry(message, "寻墨成功！书已送达。")
@@ -163,12 +177,12 @@ async def execute_pending_selection(
             selection_index=selection_index,
         )
     except SystemExit as exc:
-        log_failure("站内选书入库失败。")
-        await send_text_with_retry(context, chat_id, "寻墨失败，请查看日志。")
-        log_info(f"失败原因: {exc}")
+        reason = user_visible_error_message(exc)
+        log_failure(f"站内选书入库失败：{reason}")
+        await send_text_with_retry(context, chat_id, f"寻墨中断：{reason}")
         return
 
-    await send_text_with_retry(context, chat_id, result)
+    await send_text_with_retry(context, chat_id, f"寻墨成功！{result}")
 
 
 async def send_selection_page(message, pending: PendingSelection) -> None:
@@ -209,11 +223,11 @@ async def start_selection_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         preparation = await asyncio.to_thread(prepare_seek_request, query)
     except SystemExit as exc:
-        reason = str(exc)
+        reason = user_visible_error_message(exc)
         if "书架已存在《" in reason:
-            await reply_with_retry(message, reason.split("寻墨成功：", 1)[-1])
+            await reply_with_retry(message, reason)
             return
-        await reply_with_retry(message, "寻墨失败，请查看日志。")
+        await reply_with_retry(message, f"寻墨中断：{reason}")
         log_failure(f"检索任务准备失败：{reason}")
         return
 
@@ -226,7 +240,7 @@ async def start_selection_flow(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if preparation.state != STATE_WAITING_FOR_SELECTION:
-        await reply_with_retry(message, "寻墨失败，请查看日志。")
+        await reply_with_retry(message, "寻墨中断：当前选书状态异常，请重新发送书名。")
         return
 
     pending = PendingSelection(

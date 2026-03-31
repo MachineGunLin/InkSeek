@@ -80,8 +80,10 @@ def execute_selection(preparation: WeReadSeekPreparation, *, selection_index: in
         candidate = preparation.candidates[selection_index]
         source = "已根据您的选择完成入库"
 
-    add_candidate_to_shelf(candidate)
-    return f"{source}：《{candidate.title}》"
+    log_info(source)
+    detail = add_candidate_to_shelf(candidate)
+    log_info(f"站内入库结果：{detail}")
+    return f"《{candidate.title}》已加入书架，请去微信读书查收。"
 
 
 def run_public_fallback(query: str) -> None:

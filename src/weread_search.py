@@ -20,13 +20,40 @@ SHELF_AUTHOR_SELECTOR = ".wr_index_mini_shelf_card_content_author"
 
 RESULT_CARD_SELECTOR = ".wr_bookList_item_container"
 ADD_TO_SHELF_SELECTORS = [
-    "text=加入书架",
     "button:has-text('加入书架')",
-    "text=放入书架",
+    "a:has-text('加入书架')",
+    "[role='button']:has-text('加入书架')",
     "button:has-text('放入书架')",
-    "text=加入",
+    "a:has-text('放入书架')",
+    "[role='button']:has-text('放入书架')",
+]
+READ_ACTION_SELECTORS = [
+    "button:has-text('继续阅读')",
+    "a:has-text('继续阅读')",
+    "[role='button']:has-text('继续阅读')",
+    "button:has-text('开始阅读')",
+    "a:has-text('开始阅读')",
+    "[role='button']:has-text('开始阅读')",
+    "button:has-text('在读')",
+    "a:has-text('在读')",
+    "[role='button']:has-text('在读')",
+    "button:has-text('阅读')",
+    "a:has-text('阅读')",
+    "[role='button']:has-text('阅读')",
 ]
 READER_READY_MARKERS = ["目录", "继续阅读", "已在书架", "书架", "返回书架"]
+RESTRICTED_MARKERS = [
+    "版权受限",
+    "暂无版权",
+    "因版权限制",
+    "版权方要求",
+    "暂时无法阅读",
+    "仅支持在 App 内阅读",
+    "仅支持在App内阅读",
+    "请前往 App 阅读",
+    "请前往App阅读",
+]
+READY_CONTAINER_SELECTOR = ".readerCatalog, .readerBookInfo, .readerContent"
 
 STATE_DUPLICATE_FOUND = "duplicate_found"
 STATE_WAITING_FOR_SELECTION = "waiting_for_selection"
@@ -328,33 +355,127 @@ def collect_search_candidates(page, query: str, limit: int = 3) -> list[WeReadCa
 
 def page_text(page) -> str:
     try:
-        return page.locator("body").inner_text(timeout=3000)
+        return page.locator("body").inner_text(timeout=5000)
     except Error:
         return ""
 
 
-def click_add_to_shelf_if_available(page) -> bool:
-    for selector in ADD_TO_SHELF_SELECTORS:
+def wait_for_book_surface(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except TimeoutError:
+        pass
+    except Error:
+        pass
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except TimeoutError:
+        pass
+    except Error:
+        pass
+
+    page.wait_for_timeout(1500)
+
+
+def first_visible_selector(page, selectors: list[str]) -> str | None:
+    for selector in selectors:
         try:
             locator = page.locator(selector).first
             if locator.is_visible(timeout=1500):
-                locator.click(timeout=3000)
-                page.wait_for_timeout(2000)
-                return True
+                return selector
         except Error:
             continue
-    return False
+    return None
 
 
-def ensure_reader_ready(page, candidate: WeReadCandidate) -> None:
-    text = page_text(page)
-    if any(marker in text for marker in READER_READY_MARKERS):
-        return
+def detect_visible_action_labels(page) -> list[str]:
+    try:
+        return page.locator("button, a, [role='button']").evaluate_all(
+            """
+            (elements, keywords) => {
+              const visible = element => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              return elements
+                .filter(visible)
+                .map(element => (element.innerText || '').trim())
+                .filter(text => text && keywords.some(keyword => text.includes(keyword)))
+                .slice(0, 12);
+            }
+            """,
+            ["加入书架", "放入书架", "阅读", "在读", "继续阅读", "开始阅读"],
+        )
+    except Error:
+        return []
 
-    if "/web/reader/" in page.url.lower():
-        return
 
-    fail(f"已打开目标书籍，但未确认进入阅读页：{candidate.title}")
+def click_first_visible(page, selectors: list[str]) -> str | None:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if not locator.is_visible(timeout=1500):
+                continue
+            locator.click(timeout=4000)
+            wait_for_book_surface(page)
+            return selector
+        except Error:
+            continue
+    return None
+
+
+def classify_book_page_state(
+    *,
+    title: str,
+    url: str,
+    body_text: str,
+    has_add_action: bool,
+    has_read_action: bool,
+    has_ready_container: bool,
+    visible_action_labels: list[str],
+) -> tuple[str, str]:
+    matched_restricted = next((marker for marker in RESTRICTED_MARKERS if marker in body_text), None)
+    if matched_restricted is not None:
+        return "restricted", f"《{title}》当前显示“{matched_restricted}”，暂时无法自动入库。"
+
+    if has_ready_container or "/web/reader/" in url.lower() or any(marker in body_text for marker in READER_READY_MARKERS):
+        return "ready", f"《{title}》已进入阅读页。"
+
+    if has_add_action:
+        return "add", f"《{title}》已定位到加入书架按钮。"
+
+    if has_read_action:
+        action_label = next(
+            (label for label in visible_action_labels if any(keyword in label for keyword in ["继续阅读", "开始阅读", "在读", "阅读"])),
+            "阅读",
+        )
+        return "read", f"《{title}》当前显示“{action_label}”，准备打开阅读页。"
+
+    visible_actions = "、".join(visible_action_labels[:4]) if visible_action_labels else "无"
+    return "unknown", f"未识别到《{title}》的加入书架按钮或阅读入口。可见动作：{visible_actions}"
+
+
+def inspect_book_page_state(page, candidate: WeReadCandidate) -> tuple[str, str]:
+    body_text = page_text(page)
+    visible_action_labels = detect_visible_action_labels(page)
+    has_add_action = first_visible_selector(page, ADD_TO_SHELF_SELECTORS) is not None
+    has_read_action = first_visible_selector(page, READ_ACTION_SELECTORS) is not None
+    try:
+        has_ready_container = page.locator(READY_CONTAINER_SELECTOR).first.is_visible(timeout=500)
+    except Error:
+        has_ready_container = False
+
+    return classify_book_page_state(
+        title=candidate.title,
+        url=page.url,
+        body_text=body_text,
+        has_add_action=has_add_action,
+        has_read_action=has_read_action,
+        has_ready_container=has_ready_container,
+        visible_action_labels=visible_action_labels,
+    )
 
 
 def prepare_seek_selection(query: str, limit: int = 3) -> WeReadSeekPreparation:
@@ -408,7 +529,7 @@ def select_highest_rated(candidates: list[WeReadCandidate]) -> WeReadCandidate:
     return max(candidates, key=lambda item: (item.rating, item.reading_count))
 
 
-def add_candidate_to_shelf(candidate: WeReadCandidate) -> None:
+def add_candidate_to_shelf(candidate: WeReadCandidate) -> str:
     if not candidate.href:
         fail(f"未拿到可用的书籍入口：{candidate.title}")
 
@@ -423,9 +544,30 @@ def add_candidate_to_shelf(candidate: WeReadCandidate) -> None:
         try:
             ensure_logged_in(page)
             page.goto(urljoin(HOME_URL, candidate.href), wait_until="commit", timeout=45000)
-            page.wait_for_timeout(5000)
-            click_add_to_shelf_if_available(page)
-            ensure_reader_ready(page, candidate)
+            for _ in range(3):
+                wait_for_book_surface(page)
+                state, detail = inspect_book_page_state(page, candidate)
+                log_info(f"站内入库检测：{detail}")
+
+                if state == "ready":
+                    return detail
+
+                if state == "restricted":
+                    fail(detail)
+
+                if state == "add":
+                    log_info(f"正在点击加入书架：{candidate.title}")
+                    if click_first_visible(page, ADD_TO_SHELF_SELECTORS) is not None:
+                        continue
+
+                if state == "read":
+                    log_info(f"正在打开阅读页：{candidate.title}")
+                    if click_first_visible(page, READ_ACTION_SELECTORS) is not None:
+                        continue
+
+                page.wait_for_timeout(1500)
+
+            fail(f"未找到《{candidate.title}》的加入书架按钮，且未能进入阅读页。")
         except TimeoutError as exc:
             fail(f"微信读书选书入库超时: {exc}")
         except Error as exc:
