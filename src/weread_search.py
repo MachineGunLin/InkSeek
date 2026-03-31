@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import json
 import re
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ READER_READY_MARKERS = ["目录", "继续阅读", "已在书架", "书架", "返
 STATE_DUPLICATE_FOUND = "duplicate_found"
 STATE_WAITING_FOR_SELECTION = "waiting_for_selection"
 STATE_NOT_FOUND = "not_found"
+TITLE_SIMILARITY_THRESHOLD = 0.6
 
 
 @dataclass
@@ -58,6 +60,39 @@ def query_matches_title(query: str, title: str) -> bool:
     normalized_query = normalize_lookup_text(query)
     normalized_title = normalize_lookup_text(title)
     return bool(normalized_query and (normalized_query in normalized_title or normalized_title in normalized_query))
+
+
+def build_title_variants(title: str) -> set[str]:
+    variants: set[str] = set()
+    normalized_title = normalize_lookup_text(title)
+    if normalized_title:
+        variants.add(normalized_title)
+
+    for fragment in re.split(r"[\s/|·•—\-（）()《》【】\[\]，,。!！?？:：;；]+", title or ""):
+        normalized_fragment = normalize_lookup_text(fragment)
+        if len(normalized_fragment) >= 2:
+            variants.add(normalized_fragment)
+
+    return variants
+
+
+def title_similarity_score(query: str, title: str) -> float:
+    normalized_query = normalize_lookup_text(query)
+    if not normalized_query:
+        return 0.0
+
+    scores = [
+        SequenceMatcher(None, normalized_query, variant).ratio()
+        for variant in build_title_variants(title)
+        if variant
+    ]
+    return max(scores, default=0.0)
+
+
+def log_title_match(query: str, title: str, score: float, accepted: bool, reason: str | None = None) -> None:
+    decision = "Accepted" if accepted else "Rejected"
+    suffix = f" ({reason})" if reason else ""
+    log_info(f"[Match] 输入: {query} vs 结果: {title} | Score: {score:.2f} -> {decision}{suffix}")
 
 
 def ensure_logged_in(page) -> None:
@@ -93,18 +128,13 @@ def wait_for_search_page(page, query: str) -> None:
     for _ in range(3):
         try:
             page.goto(search_url, wait_until="commit", timeout=45000)
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(5000)
+            return
         except Error as exc:
             last_error = f"{type(exc).__name__}: {exc}"
-            continue
+            page.wait_for_timeout(1500)
 
-        try:
-            if page.locator(RESULT_CARD_SELECTOR).count() > 0:
-                return
-        except Error as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-
-    fail(f"微信读书搜索页打开失败: {last_error or '未加载出搜索结果'}")
+    fail(f"微信读书搜索页打开失败: {last_error or '未完成页面跳转'}")
 
 
 def fetch_search_metadata(page, query: str) -> list[dict]:
@@ -141,17 +171,31 @@ def fetch_search_metadata(page, query: str) -> list[dict]:
     return books if isinstance(books, list) else []
 
 
-def build_metadata_map(items: list[dict]) -> dict[tuple[str, str], dict]:
+def build_metadata_map(items: list[dict]) -> tuple[dict[tuple[str, str], dict], dict[str, dict]]:
     metadata_map: dict[tuple[str, str], dict] = {}
+    metadata_title_map: dict[str, dict] = {}
     for item in items:
         book_info = item.get("bookInfo") or {}
         title = str(book_info.get("title") or "").strip()
         author = str(book_info.get("author") or "").strip()
         if not title:
             continue
-        key = (normalize_lookup_text(title), normalize_lookup_text(author))
+        normalized_title = normalize_lookup_text(title)
+        key = (normalized_title, normalize_lookup_text(author))
         metadata_map[key] = book_info
-    return metadata_map
+        existing = metadata_title_map.get(normalized_title)
+        if existing is None:
+            metadata_title_map[normalized_title] = book_info
+            continue
+
+        current_rating = float(book_info.get("newRating") or 0)
+        existing_rating = float(existing.get("newRating") or 0)
+        current_reading = int(book_info.get("readingCount") or book_info.get("reading") or 0)
+        existing_reading = int(existing.get("readingCount") or existing.get("reading") or 0)
+        if (current_rating, current_reading) > (existing_rating, existing_reading):
+            metadata_title_map[normalized_title] = book_info
+
+    return metadata_map, metadata_title_map
 
 
 def parse_shelf_card(card) -> WeReadCandidate | None:
@@ -189,7 +233,11 @@ def scan_shelf_for_duplicate(page, query: str) -> WeReadCandidate | None:
     return None
 
 
-def parse_search_card(card, metadata_map: dict[tuple[str, str], dict]) -> WeReadCandidate | None:
+def parse_search_card(
+    card,
+    metadata_map: dict[tuple[str, str], dict],
+    metadata_title_map: dict[str, dict],
+) -> WeReadCandidate | None:
     try:
         text = card.inner_text(timeout=2000)
     except Error:
@@ -217,7 +265,12 @@ def parse_search_card(card, metadata_map: dict[tuple[str, str], dict]) -> WeRead
     except Error:
         href = ""
 
-    metadata = metadata_map.get((normalize_lookup_text(title), normalize_lookup_text(author)), {})
+    normalized_title = normalize_lookup_text(title)
+    normalized_author = normalize_lookup_text(author)
+    metadata = metadata_map.get((normalized_title, normalized_author))
+    if metadata is None:
+        metadata = metadata_title_map.get(normalized_title, {})
+
     translator = str(metadata.get("translator") or "").strip()
     rating_raw = metadata.get("newRating")
     rating = float(rating_raw or 0) / 10.0 if rating_raw is not None else 0.0
@@ -239,19 +292,31 @@ def parse_search_card(card, metadata_map: dict[tuple[str, str], dict]) -> WeRead
 
 
 def collect_search_candidates(page, query: str, limit: int = 3) -> list[WeReadCandidate]:
-    metadata_map = build_metadata_map(fetch_search_metadata(page, query))
+    metadata_map, metadata_title_map = build_metadata_map(fetch_search_metadata(page, query))
+    if not metadata_title_map:
+        log_info("[Match] 搜索接口未返回可信书目，站内结果全部跳过。")
+        return []
+
     cards = page.locator(RESULT_CARD_SELECTOR)
     total = min(cards.count(), 20)
     candidates: list[WeReadCandidate] = []
     seen: set[tuple[str, str]] = set()
 
     for index in range(total):
-        candidate = parse_search_card(cards.nth(index), metadata_map)
+        candidate = parse_search_card(cards.nth(index), metadata_map, metadata_title_map)
         if candidate is None:
             continue
-        if not query_matches_title(query, candidate.title):
+
+        normalized_title = normalize_lookup_text(candidate.title)
+        trusted = normalized_title in metadata_title_map
+        score = title_similarity_score(query, candidate.title)
+        accepted = trusted and score >= TITLE_SIMILARITY_THRESHOLD
+        reason = None if accepted or trusted else "NotInSearchFeed"
+        log_title_match(query, candidate.title, score, accepted, reason=reason)
+        if not accepted:
             continue
-        key = (normalize_lookup_text(candidate.title), normalize_lookup_text(candidate.author))
+
+        key = (normalized_title, normalize_lookup_text(candidate.author))
         if key in seen:
             continue
         seen.add(key)

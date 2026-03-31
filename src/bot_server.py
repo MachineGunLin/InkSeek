@@ -10,6 +10,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.request import HTTPXRequest
 
 from seek_pipeline import (
+    PUBLIC_FALLBACK_MESSAGE,
     STATE_DUPLICATE_FOUND,
     STATE_NOT_FOUND,
     STATE_WAITING_FOR_SELECTION,
@@ -21,8 +22,9 @@ from seek_pipeline import (
 )
 from utils import format_failure, load_env_file, log_failure, log_info, require_env
 
-SELECTION_TIMEOUT_SECONDS = 60
+SELECTION_TIMEOUT_SECONDS = 300
 REPLY_RETRY_ATTEMPTS = 3
+PENDING_SELECTIONS_KEY = "pending_selections"
 
 
 @dataclass
@@ -88,16 +90,25 @@ async def send_text_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
             await asyncio.sleep(float(attempt * 2))
 
 
-def get_pending_selection(context: ContextTypes.DEFAULT_TYPE) -> PendingSelection | None:
-    return context.application.bot_data.get("pending_selection")
+def pending_selection_store(context: ContextTypes.DEFAULT_TYPE) -> dict[int, PendingSelection]:
+    store = context.application.bot_data.get(PENDING_SELECTIONS_KEY)
+    if isinstance(store, dict):
+        return store
+    store = {}
+    context.application.bot_data[PENDING_SELECTIONS_KEY] = store
+    return store
 
 
-def set_pending_selection(context: ContextTypes.DEFAULT_TYPE, pending: PendingSelection | None) -> None:
-    context.application.bot_data["pending_selection"] = pending
+def get_pending_selection(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> PendingSelection | None:
+    return pending_selection_store(context).get(chat_id)
 
 
-async def clear_pending_selection(context: ContextTypes.DEFAULT_TYPE) -> None:
-    pending = get_pending_selection(context)
+def set_pending_selection(context: ContextTypes.DEFAULT_TYPE, pending: PendingSelection) -> None:
+    pending_selection_store(context)[pending.chat_id] = pending
+
+
+async def clear_pending_selection(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    pending = get_pending_selection(context, chat_id)
     if pending is None:
         return
 
@@ -109,11 +120,11 @@ async def clear_pending_selection(context: ContextTypes.DEFAULT_TYPE) -> None:
             await task
         except asyncio.CancelledError:
             pass
-    set_pending_selection(context, None)
+    pending_selection_store(context).pop(chat_id, None)
 
 
 async def run_public_seek_flow(context: ContextTypes.DEFAULT_TYPE, message, query: str) -> None:
-    await reply_with_retry(message, "站内无果，正在启动公开书源寻墨...")
+    await reply_with_retry(message, PUBLIC_FALLBACK_MESSAGE)
     try:
         await asyncio.to_thread(run_public_fallback, query)
     except SystemExit as exc:
@@ -135,12 +146,12 @@ async def execute_pending_selection(
     *,
     prefix_message: str | None = None,
 ) -> None:
-    pending = get_pending_selection(context)
+    pending = get_pending_selection(context, chat_id)
     if pending is None:
         return
 
     preparation = pending.preparation
-    await clear_pending_selection(context)
+    await clear_pending_selection(context, chat_id)
 
     if prefix_message:
         await send_text_with_retry(context, chat_id, prefix_message)
@@ -173,14 +184,14 @@ async def send_selection_page(message, pending: PendingSelection) -> None:
 async def auto_select_after_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int, query: str) -> None:
     try:
         await asyncio.sleep(SELECTION_TIMEOUT_SECONDS)
-        pending = get_pending_selection(context)
+        pending = get_pending_selection(context, chat_id)
         if pending is None or pending.chat_id != chat_id or pending.query != query:
             return
         await execute_pending_selection(
             context,
             chat_id,
             None,
-            prefix_message="60 秒未收到选择，已自动为您选择推荐值最高的版本。",
+            prefix_message=f"{SELECTION_TIMEOUT_SECONDS} 秒未收到选择，已自动为您选择推荐值最高的版本。",
         )
     except asyncio.CancelledError:
         return
@@ -252,7 +263,10 @@ async def handle_selection_input(
         return
 
     if not text.isdigit():
-        await reply_with_retry(message, "当前正在等待选书，请回复数字，或输入“下一页 / 上一页”翻页。60 秒未回复时我会自动选择推荐值最高的版本。")
+        await reply_with_retry(
+            message,
+            f"当前正在等待选书，请回复数字，或输入“下一页 / 上一页”翻页。{SELECTION_TIMEOUT_SECONDS} 秒未回复时我会自动选择推荐值最高的版本。",
+        )
         return
 
     selection = int(text)
@@ -283,7 +297,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not text:
         return
 
-    pending = get_pending_selection(context)
+    pending = get_pending_selection(context, message.chat_id)
     if pending is not None and pending.user_id == user.id and pending.chat_id == message.chat_id:
         await handle_selection_input(update, context, pending, text)
         return
@@ -309,7 +323,7 @@ def main() -> None:
         .build()
     )
     application.bot_data["allowed_user_id"] = allowed_user_id
-    application.bot_data["pending_selection"] = None
+    application.bot_data[PENDING_SELECTIONS_KEY] = {}
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     log_info("Telegram 遥控器开始监听消息。")

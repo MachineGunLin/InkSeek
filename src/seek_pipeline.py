@@ -15,6 +15,8 @@ from weread_search import (
 )
 
 PAGE_SIZE = 5
+SELECTION_TIMEOUT_SECONDS = 300
+PUBLIC_FALLBACK_MESSAGE = "站内未找到精准匹配，正在为您启动公开书源检索..."
 
 
 def prepare_seek_request(query: str) -> WeReadSeekPreparation:
@@ -33,7 +35,7 @@ def prepare_seek_request(query: str) -> WeReadSeekPreparation:
         log_candidate_preview(preparation.candidates)
         return preparation
 
-    log_info("站内无果，正在启动公开书源寻墨...")
+    log_info(PUBLIC_FALLBACK_MESSAGE)
     return preparation
 
 
@@ -61,7 +63,7 @@ def format_candidate_options(candidates: list[WeReadCandidate], page_index: int 
             controls.append("回复“上一页”返回前页")
         if controls:
             lines.append("；".join(controls))
-    lines.append("60 秒未回复时，我会自动选择推荐值最高的版本。")
+    lines.append(f"{SELECTION_TIMEOUT_SECONDS} 秒未回复时，我会自动选择推荐值最高的版本。")
     return "\n".join(lines)
 
 
