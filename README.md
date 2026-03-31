@@ -6,15 +6,62 @@
 
 用于自动化处理电子书导入与微信读书链路管理。
 
-## 快速开始
+## 快速开始 / Quick Start
+
+### 1. 环境准备
+
+先安装 Python 依赖，再初始化 Playwright 浏览器环境：
+
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+如果本机没有 `playwright` 可执行命令，可以改用：
+
+```bash
+python3 -m playwright install chromium
+```
+
+### 2. 第一次使用：登录微信读书
+
+第一次使用，或登录态失效时，必须先在终端执行：
 
 ```bash
 python3 main.py login
+```
+
+执行后会弹出浏览器，请手动扫码登录。登录成功后，脚本会自动保存登录态到 `data/weread_state.json`。后续命令会复用这份登录态，通常无需重复扫码。
+
+建议登录完成后顺手校验一次：
+
+```bash
 python3 main.py check
-python3 main.py seek "科学怪人"
-python3 main.py upload <path-to-file>
+```
+
+### 3. 使用方式
+
+CLI 模式：
+
+```bash
+python3 main.py seek "书名"
+```
+
+Telegram 模式：
+
+当前仓库的机器人入口位于 `src/` 目录，请先确认 `.env` 已配置完成，然后执行：
+
+```bash
 python3 src/bot_server.py
 ```
+
+启动后，直接在 Telegram 中发送书名即可触发检索流程。
+
+### 4. 常见问题 / Troubleshooting
+
+- 如果遇到 `ERR_CONNECTION_CLOSED`，请先检查本机代理设置。
+- 建议将 `weread.qq.com` 加入代理白名单，或临时关闭全局代理后再重试。
+- 如果提示登录态失效、Session 不可用或无法进入微信读书首页，请重新执行 `python3 main.py login`。
 
 ## 已完成核心功能
 

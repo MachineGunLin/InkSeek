@@ -1,0 +1,6 @@
+playwright
+python-telegram-bot
+httpx
+ebooklib
+Pillow
+beautifulsoup4
